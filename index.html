@@ -1331,6 +1331,54 @@ const TYPE_VARIANTS = {
       atmCol:    hexToRgb('#a0e8e0'),
       auroraCol: hexToRgb('#80ffe0'),
     },
+    {
+      name: 'Dagobah',  // Star Wars: dark swamp world, tea-stained water, dense canopy
+      _easterEgg: true,
+      water:     hexToRgb('#2a3a18'),
+      deepWater: hexToRgb('#101808'),
+      shore:     hexToRgb('#505830'),
+      beach:     hexToRgb('#605838'),
+      lowland:   hexToRgb('#384818'),
+      plains:    hexToRgb('#485828'),
+      forest:    hexToRgb('#102008'),
+      arid:      hexToRgb('#586038'),
+      hills:     hexToRgb('#283018'),
+      mountain:  hexToRgb('#181808'),
+      atmCol:    hexToRgb('#788858'),
+      auroraCol: hexToRgb('#80a050'),
+    },
+    {
+      name: 'Gallifrey',  // Doctor Who: red grass, silver-leaved trees, orange sky
+      _easterEgg: true,
+      water:     hexToRgb('#6a3818'),
+      deepWater: hexToRgb('#2a1808'),
+      shore:     hexToRgb('#b87048'),
+      beach:     hexToRgb('#d8a878'),
+      lowland:   hexToRgb('#a83828'),
+      plains:    hexToRgb('#c85028'),
+      forest:    hexToRgb('#702010'),
+      arid:      hexToRgb('#c89858'),
+      hills:     hexToRgb('#883820'),
+      mountain:  hexToRgb('#481810'),
+      atmCol:    hexToRgb('#f0a058'),
+      auroraCol: hexToRgb('#ffc080'),
+    },
+    {
+      name: 'Nibiran',  // Star Trek (Into Darkness): red-leaved forests, copper sky
+      _easterEgg: true,
+      water:     hexToRgb('#1a4868'),
+      deepWater: hexToRgb('#08203a'),
+      shore:     hexToRgb('#3a8aa8'),
+      beach:     hexToRgb('#d8a878'),
+      lowland:   hexToRgb('#a83820'),
+      plains:    hexToRgb('#c85838'),
+      forest:    hexToRgb('#601818'),
+      arid:      hexToRgb('#a87838'),
+      hills:     hexToRgb('#683018'),
+      mountain:  hexToRgb('#380808'),
+      atmCol:    hexToRgb('#d8a058'),
+      auroraCol: hexToRgb('#ff6048'),
+    },
   ],
   ocean: [
     { name: 'Deep Ocean' },
@@ -1357,6 +1405,15 @@ const TYPE_VARIANTS = {
       shore:     hexToRgb('#4aa86a'),
       atmCol:    hexToRgb('#80c890'),
       auroraCol: hexToRgb('#a0ff80'),
+    },
+    {
+      name: 'Kaminoan',  // Star Wars: stormy gray-black ocean, cloning facility world
+      _easterEgg: true,
+      deepWater: hexToRgb('#181c20'),
+      water:     hexToRgb('#384048'),
+      shore:     hexToRgb('#688090'),
+      atmCol:    hexToRgb('#88a0b0'),
+      auroraCol: hexToRgb('#80c0e8'),
     },
   ],
   desert: [
@@ -1469,6 +1526,20 @@ const TYPE_VARIANTS = {
       polarIce:  hexToRgb('#fff8e0'),
       auroraCol: hexToRgb('#ffd098'),
     },
+    {
+      name: 'Geonosian',  // Star Wars: red-orange canyons, droid-foundry world
+      _easterEgg: true,
+      lowland:   hexToRgb('#883818'),
+      plains:    hexToRgb('#a85028'),
+      forest:    hexToRgb('#601810'),
+      arid:      hexToRgb('#c87038'),
+      hills:     hexToRgb('#683018'),
+      mountain:  hexToRgb('#3a1008'),
+      peak:      hexToRgb('#c89878'),
+      atmCol:    hexToRgb('#c87038'),
+      polarIce:  hexToRgb('#d8a878'),
+      auroraCol: hexToRgb('#ff8030'),
+    },
   ],
   ice: [
     { name: 'Pristine Ice' },
@@ -1537,6 +1608,20 @@ const TYPE_VARIANTS = {
       polarIce:  hexToRgb('#ffffff'),
       auroraCol: hexToRgb('#a0c8ff'),
     },
+    {
+      name: 'Europan',  // Jovian moon: smooth white ice with rust-red linea cracks
+      _easterEgg: true,
+      lowland:   hexToRgb('#e0d0c0'),
+      plains:    hexToRgb('#f0e0d0'),
+      forest:    hexToRgb('#a06848'),  // rust crack veins peek through
+      arid:      hexToRgb('#f8eddc'),
+      hills:     hexToRgb('#88503a'),  // exposed crack ridges
+      mountain:  hexToRgb('#583020'),
+      peak:      hexToRgb('#fff8f0'),
+      atmCol:    hexToRgb('#d0c0a8'),
+      polarIce:  hexToRgb('#ffffff'),
+      auroraCol: hexToRgb('#a0c0e0'),
+    },
   ],
   volcanic: [
     { name: 'Active Volcanic' },
@@ -1589,6 +1674,32 @@ const TYPE_VARIANTS = {
       peak:      hexToRgb('#0a0402'),
       atmCol:    hexToRgb('#a04020'),
       auroraCol: hexToRgb('#ff8040'),
+    },
+    {
+      name: 'Venusian',  // Solar system: sulfur-cloud-shrouded surface, baked rock
+      _easterEgg: true,
+      lava:      hexToRgb('#a06010'),  // muted hot rock, not flowing lava
+      lavaHot:   hexToRgb('#d89030'),
+      crust:     hexToRgb('#604018'),
+      ash:       hexToRgb('#5a4828'),
+      rock:      hexToRgb('#a07840'),
+      sulfur:    hexToRgb('#d8a850'),
+      peak:      hexToRgb('#3a2810'),
+      atmCol:    hexToRgb('#e8b860'),  // dense sulfuric-acid haze
+      auroraCol: hexToRgb('#ffd090'),
+    },
+    {
+      name: 'Mordor',  // LOTR: ash-covered volcanic wasteland, red-black sky
+      _easterEgg: true,
+      lava:      hexToRgb('#c83018'),
+      lavaHot:   hexToRgb('#ff8038'),
+      crust:     hexToRgb('#181010'),
+      ash:       hexToRgb('#282028'),
+      rock:      hexToRgb('#382828'),
+      sulfur:    hexToRgb('#683020'),
+      peak:      hexToRgb('#080808'),
+      atmCol:    hexToRgb('#502820'),
+      auroraCol: hexToRgb('#ff5028'),
     },
   ],
   cratered: [
@@ -1698,6 +1809,22 @@ const TYPE_VARIANTS = {
       cloud:  hexToRgb('#f8d0c0'),
       atmCol: hexToRgb('#c84838'),
       auroraCol: hexToRgb('#ff8060'),
+    },
+    {
+      name: 'Bespin',  // Star Wars: Cloud City — soft pink/orange/peach pastels
+      _easterEgg: true,
+      bands: [
+        hexToRgb('#f0c890'),
+        hexToRgb('#f8d8a8'),
+        hexToRgb('#d89878'),
+        hexToRgb('#fae0c0'),
+        hexToRgb('#a86858'),
+        hexToRgb('#f8c898'),
+      ],
+      storm:  hexToRgb('#c87858'),
+      cloud:  hexToRgb('#fff0e0'),
+      atmCol: hexToRgb('#f8c098'),
+      auroraCol: hexToRgb('#ffb088'),
     },
   ],
   ice_giant: [
@@ -1866,26 +1993,80 @@ const TYPE_VARIANTS = {
 // must exist in TYPE_VARIANTS for the matching type, flagged _easterEgg.
 // ============================================================
 const EASTER_EGGS = {
-  // ----- Star Trek -----
-  'VULCAN':       { type: 'desert',      atmosphere: 'thin',  size: 0.55, forceVariant: 'Vulcan' },
-  "QO'NOS":       { type: 'volcanic',    atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
-  'QONOS':        { type: 'volcanic',    atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
-  'KRONOS':       { type: 'volcanic',    atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
-  'ROMULUS':      { type: 'terrestrial', atmosphere: 'thick', size: 0.55, forceVariant: 'Romulan' },
-  'BAJOR':        { type: 'terrestrial', atmosphere: 'thick', size: 0.50, forceVariant: 'Bajoran' },
-  'CARDASSIA':    { type: 'desert',      atmosphere: 'thin',  size: 0.55, forceVariant: 'Cardassian' },
-  'ANDORIA':      { type: 'ice',         atmosphere: 'thin',  size: 0.45, forceVariant: 'Andorian' },
-  'RISA':         { type: 'terrestrial', atmosphere: 'thick', size: 0.50, forceVariant: 'Risan' },
-  'TRILL':        { type: 'terrestrial', atmosphere: 'thick', size: 0.50, forceVariant: 'Trill' },
-  'BETAZED':      { type: 'terrestrial', atmosphere: 'thick', size: 0.50, forceVariant: 'Betazed' },
-  'GENESIS':      { type: 'terrestrial', atmosphere: 'thick', size: 0.50, forceVariant: 'Genesis' },
-  // ----- Other sci-fi -----
-  'ARRAKIS':      { type: 'desert',      atmosphere: 'thin',  size: 0.50, forceVariant: 'Arrakis' },
-  'DUNE':         { type: 'desert',      atmosphere: 'thin',  size: 0.50, forceVariant: 'Arrakis' },
-  'TATOOINE':     { type: 'desert',      atmosphere: 'thin',  size: 0.45, forceVariant: 'Tatooine' },
-  'HOTH':         { type: 'ice',         atmosphere: 'thin',  size: 0.45, forceVariant: 'Hoth' },
-  'MUSTAFAR':     { type: 'volcanic',    atmosphere: 'thick', size: 0.50, forceVariant: 'Mustafar' },
-  'PANDORA':      { type: 'terrestrial', atmosphere: 'thick', size: 0.55, forceVariant: 'Pandora' },
+  // ===== Solar System — Earth's neighborhood =====
+  'MERCURY':      { type: 'cratered',     atmosphere: 'none',  size: 0.32, forceVariant: 'Mercurian' },
+  'VENUS':        { type: 'volcanic',     atmosphere: 'dense', size: 0.55, forceVariant: 'Venusian' },
+  'MARS':         { type: 'desert',       atmosphere: 'thin',  size: 0.42, forceVariant: 'Mars-like' },
+  'JUPITER':      { type: 'gas_giant',    atmosphere: 'dense', size: 0.95, forceVariant: 'Jovian' },
+  'SATURN':       { type: 'gas_giant',    atmosphere: 'dense', size: 0.90, forceVariant: 'Saturnian' },
+  'URANUS':       { type: 'ice_giant',    atmosphere: 'thick', size: 0.75, forceVariant: 'Uranian' },
+  'NEPTUNE':      { type: 'ice_giant',    atmosphere: 'thick', size: 0.78, forceVariant: 'Neptunian' },
+  // ----- Moons & dwarf planets -----
+  'LUNA':         { type: 'cratered',     atmosphere: 'none',  size: 0.30, forceVariant: 'Lunar' },
+  'MOON':         { type: 'cratered',     atmosphere: 'none',  size: 0.30, forceVariant: 'Lunar' },
+  'IO':           { type: 'volcanic',     atmosphere: 'thin',  size: 0.32, forceVariant: 'Sulfur World' },
+  'EUROPA':       { type: 'ice',          atmosphere: 'none',  size: 0.30, forceVariant: 'Europan' },
+  'GANYMEDE':     { type: 'cratered',     atmosphere: 'none',  size: 0.36, forceVariant: 'Frost Cratered' },
+  'CALLISTO':     { type: 'cratered',     atmosphere: 'none',  size: 0.34, forceVariant: 'Iron Cratered' },
+  'TITAN':        { type: 'terrestrial',  atmosphere: 'dense', size: 0.42, forceVariant: 'Methane Amber' },
+  'ENCELADUS':    { type: 'ice',          atmosphere: 'none',  size: 0.22, forceVariant: 'Pristine Ice' },
+  'TRITON':       { type: 'ice',          atmosphere: 'thin',  size: 0.30, forceVariant: 'Tholin Ice' },
+  'PLUTO':        { type: 'dwarf_planet', atmosphere: 'none',  size: 0.26, forceVariant: 'Plutoid' },
+  'CERES':        { type: 'dwarf_planet', atmosphere: 'none',  size: 0.22, forceVariant: 'Carbonaceous' },
+  'ERIS':         { type: 'dwarf_planet', atmosphere: 'none',  size: 0.25, forceVariant: 'Methane Frost' },
+  'MAKEMAKE':     { type: 'dwarf_planet', atmosphere: 'none',  size: 0.24, forceVariant: 'Tholin' },
+  'HAUMEA':       { type: 'dwarf_planet', atmosphere: 'none',  size: 0.24, forceVariant: 'Plutoid' },
+  'SEDNA':        { type: 'dwarf_planet', atmosphere: 'none',  size: 0.23, forceVariant: 'Tholin' },
+  'PHOBOS':       { type: 'asteroid',     atmosphere: 'none',  size: 0.16, forceVariant: 'C-Type / Carbonaceous' },
+  'DEIMOS':       { type: 'asteroid',     atmosphere: 'none',  size: 0.14, forceVariant: 'C-Type / Carbonaceous' },
+  'VESTA':        { type: 'asteroid',     atmosphere: 'none',  size: 0.20, forceVariant: 'S-Type / Silicaceous' },
+  'PSYCHE':       { type: 'asteroid',     atmosphere: 'none',  size: 0.22, forceVariant: 'M-Type / Metallic' },
+
+  // ===== Star Trek =====
+  'VULCAN':       { type: 'desert',       atmosphere: 'thin',  size: 0.55, forceVariant: 'Vulcan' },
+  "QO'NOS":       { type: 'volcanic',     atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
+  'QONOS':        { type: 'volcanic',     atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
+  'KRONOS':       { type: 'volcanic',     atmosphere: 'thick', size: 0.60, forceVariant: 'Klingon' },
+  'ROMULUS':      { type: 'terrestrial',  atmosphere: 'thick', size: 0.55, forceVariant: 'Romulan' },
+  'REMUS':        { type: 'volcanic',     atmosphere: 'thick', size: 0.50, forceVariant: 'Klingon' },
+  'BAJOR':        { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Bajoran' },
+  'CARDASSIA':    { type: 'desert',       atmosphere: 'thin',  size: 0.55, forceVariant: 'Cardassian' },
+  'ANDORIA':      { type: 'ice',          atmosphere: 'thin',  size: 0.45, forceVariant: 'Andorian' },
+  'RISA':         { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Risan' },
+  'TRILL':        { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Trill' },
+  'BETAZED':      { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Betazed' },
+  'GENESIS':      { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Genesis' },
+  'FERENGINAR':   { type: 'ocean',        atmosphere: 'dense', size: 0.50, forceVariant: 'Algal Sea' },
+  'NIBIRU':       { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Nibiran' },
+  'DELTA-VEGA':   { type: 'ice',          atmosphere: 'thin',  size: 0.45, forceVariant: 'Pristine Ice' },
+
+  // ===== Star Wars =====
+  'TATOOINE':     { type: 'desert',       atmosphere: 'thin',  size: 0.45, forceVariant: 'Tatooine' },
+  'JAKKU':        { type: 'desert',       atmosphere: 'thin',  size: 0.45, forceVariant: 'Tatooine' },
+  'GEONOSIS':     { type: 'desert',       atmosphere: 'thin',  size: 0.50, forceVariant: 'Geonosian' },
+  'HOTH':         { type: 'ice',          atmosphere: 'thin',  size: 0.45, forceVariant: 'Hoth' },
+  'MUSTAFAR':     { type: 'volcanic',     atmosphere: 'thick', size: 0.50, forceVariant: 'Mustafar' },
+  'DAGOBAH':      { type: 'terrestrial',  atmosphere: 'thick', size: 0.45, forceVariant: 'Dagobah' },
+  'NABOO':        { type: 'terrestrial',  atmosphere: 'thick', size: 0.50, forceVariant: 'Risan' },
+  'KAMINO':       { type: 'ocean',        atmosphere: 'dense', size: 0.50, forceVariant: 'Kaminoan' },
+  'ENDOR':        { type: 'terrestrial',  atmosphere: 'thick', size: 0.40, forceVariant: 'Verdant' },
+  'BESPIN':       { type: 'gas_giant',    atmosphere: 'dense', size: 0.80, forceVariant: 'Bespin' },
+  'YAVIN':        { type: 'gas_giant',    atmosphere: 'dense', size: 0.85, forceVariant: 'Jovian' },
+  'CRAIT':        { type: 'desert',       atmosphere: 'thin',  size: 0.40, forceVariant: 'Salt Flats' },
+
+  // ===== Dune =====
+  'ARRAKIS':      { type: 'desert',       atmosphere: 'thin',  size: 0.50, forceVariant: 'Arrakis' },
+  'DUNE':         { type: 'desert',       atmosphere: 'thin',  size: 0.50, forceVariant: 'Arrakis' },
+  'CALADAN':      { type: 'ocean',        atmosphere: 'thick', size: 0.50, forceVariant: 'Tropical Sea' },
+  'GIEDI-PRIME':  { type: 'volcanic',     atmosphere: 'thick', size: 0.55, forceVariant: 'Obsidian' },
+
+  // ===== Other sci-fi & fantasy =====
+  'PANDORA':      { type: 'terrestrial',  atmosphere: 'thick', size: 0.55, forceVariant: 'Pandora' },
+  'GALLIFREY':    { type: 'terrestrial',  atmosphere: 'thick', size: 0.55, forceVariant: 'Gallifrey' },
+  'SKARO':        { type: 'desert',       atmosphere: 'thin',  size: 0.50, forceVariant: 'Volcanic Ash' },
+  'MAGRATHEA':    { type: 'cratered',     atmosphere: 'none',  size: 0.40, forceVariant: 'Lunar' },
+  'MORDOR':       { type: 'volcanic',     atmosphere: 'thick', size: 0.50, forceVariant: 'Mordor' },
+  'SOLARIA':      { type: 'ocean',        atmosphere: 'thick', size: 0.55, forceVariant: 'Tropical Sea' },
 };
 
 // Pick a variant index from the rng, then merge variant overrides
