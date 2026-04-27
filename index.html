@@ -568,6 +568,7 @@ footer .err { color: var(--warn); }
         <select id="planetType">
           <option value="auto">Auto / Seed-Determined</option>
           <option value="terrestrial">Terrestrial (Earth-like)</option>
+          <option value="primordial">Primordial / Hadean</option>
           <option value="ocean">Ocean World</option>
           <option value="desert">Desert / Arid</option>
           <option value="ice">Ice / Frozen</option>
@@ -883,6 +884,31 @@ const PALETTES = {
     atmCol:    hexToRgb('#5a9adf'),
     polarIce:  hexToRgb('#e8f0f8'),
     auroraCol: hexToRgb('#40e890'),
+  },
+  primordial: {
+    // Young-Earth: dark green algal seas, sparse vegetation on land,
+    // basalt scarred by lava-flow provinces, ash-stained skies.
+    deepWater: hexToRgb('#082818'),  // very dark algal-green abyss
+    water:     hexToRgb('#0e4828'),  // chlorophyll-loaded sea
+    shore:     hexToRgb('#3a8848'),  // bright reedy shore
+    beach:     hexToRgb('#605838'),  // muddy shoreline (no white sand yet)
+    lowland:   hexToRgb('#2a4820'),  // sparse moss/lichen
+    plains:    hexToRgb('#4a5828'),  // proto-grass with bare patches
+    forest:    hexToRgb('#1a3818'),  // primitive ferny growth
+    arid:      hexToRgb('#806840'),  // ash-dusted basalt plains
+    hills:     hexToRgb('#503830'),  // weathered basalt
+    mountain:  hexToRgb('#382820'),  // unweathered basalt cliffs
+    peak:      hexToRgb('#1a1410'),  // dark volcanic spires
+    // Lava palette — flood basalts, hot rivers
+    lava:      hexToRgb('#d83018'),
+    lavaHot:   hexToRgb('#ff8030'),
+    basalt:    hexToRgb('#181010'),  // freshly cooled flow
+    // Atmosphere & clouds
+    cloudCol:  hexToRgb('#d8c8a0'),  // dirty-cream baseline cloud
+    ashCloud:  hexToRgb('#3a2818'),  // dark ash near volcanic provinces
+    atmCol:    hexToRgb('#c87838'),  // CO2-orange greenhouse haze
+    polarIce:  hexToRgb('#d8d0a8'),  // dirty/glacial polar (rare)
+    auroraCol: hexToRgb('#ff8060'),
   },
   ocean: {
     deepWater: hexToRgb('#08182a'),
@@ -1378,6 +1404,49 @@ const TYPE_VARIANTS = {
       mountain:  hexToRgb('#380808'),
       atmCol:    hexToRgb('#d8a058'),
       auroraCol: hexToRgb('#ff6048'),
+    },
+  ],
+  primordial: [
+    { name: 'Hadean' },  // Default — heavy lava, dark seas, ash-choked skies
+    {
+      // Earth ~3 Gya: methanogenic archaea, dark green algal seas, less lava
+      // than Hadean, more obvious vegetation patches surviving between flows.
+      name: 'Archean',
+      water:     hexToRgb('#0a3820'),
+      deepWater: hexToRgb('#041a10'),
+      shore:     hexToRgb('#288058'),
+      lowland:   hexToRgb('#2a5028'),
+      plains:    hexToRgb('#3a6028'),
+      forest:    hexToRgb('#1a4818'),
+      atmCol:    hexToRgb('#a07050'),
+      auroraCol: hexToRgb('#ff7048'),
+    },
+    {
+      // Earth ~300 Mya: lush primordial forests, lower volcanism but still
+      // active flood basalts (Permian-Triassic extinction era).
+      name: 'Carboniferous',
+      water:     hexToRgb('#125840'),
+      deepWater: hexToRgb('#062818'),
+      shore:     hexToRgb('#48a878'),
+      lowland:   hexToRgb('#2a5820'),
+      plains:    hexToRgb('#3a7028'),
+      forest:    hexToRgb('#0a3010'),
+      atmCol:    hexToRgb('#80b890'),
+      auroraCol: hexToRgb('#a0ff60'),
+    },
+    {
+      // Anoxic / iron-rich: rusty oxidized seas, sulfur-yellow atmosphere,
+      // life still confined to extremophile mats.
+      name: 'Anoxic',
+      water:     hexToRgb('#5a2010'),
+      deepWater: hexToRgb('#280a06'),
+      shore:     hexToRgb('#a85838'),
+      lowland:   hexToRgb('#603020'),
+      plains:    hexToRgb('#785038'),
+      forest:    hexToRgb('#3a1808'),
+      arid:      hexToRgb('#988050'),
+      atmCol:    hexToRgb('#c8a850'),
+      auroraCol: hexToRgb('#ffd060'),
     },
   ],
   ocean: [
@@ -2265,6 +2334,10 @@ class Planet {
     this.iceMap    = new Float32Array(N);   // per-pixel polar ice coverage 0..1
     this.shapeMap  = null;                   // precomputed shape factor for non-spherical bodies
     this.maxShapeR = 1;                      // outer bound for silhouette test
+    // Primordial planets only: parallel cloud-tint map. 0 = normal cream
+    // cloud, 1 = dark ash plume (volcanic particulate). Allocated lazily
+    // since most planet types don't need it.
+    this.ashMap = (this.type === 'primordial') ? new Float32Array(N) : null;
 
     this.generateTextures();
     this.generateShapeMap();
@@ -2343,7 +2416,7 @@ class Planet {
       if (r < 0.75) return 'ice';
       return 'desert';
     }
-    const types = ['terrestrial','desert','ice','volcanic','cratered','ocean','terrestrial','terrestrial'];
+    const types = ['terrestrial','desert','ice','volcanic','cratered','ocean','primordial','terrestrial','terrestrial'];
     return types[Math.floor(r * types.length)];
   }
 
@@ -2352,6 +2425,7 @@ class Planet {
     if (this.type === 'cratered' || this.type === 'asteroid') return 'none';
     if (this.type === 'dwarf_planet') return this.rng() < 0.03 ? 'thin' : 'none';
     if (this.type === 'volcanic') return this.rng() < 0.5 ? 'thick' : 'thin';
+    if (this.type === 'primordial') return this.rng() < 0.30 ? 'thin' : 'thick'; // Earth-like haze; no dense (visually too large)
     if (this.type === 'ocean')    return 'thick';
     if (this.type === 'ice')      return this.rng() < 0.6 ? 'thin' : 'thick';
     const r = this.rng();
@@ -2362,7 +2436,15 @@ class Planet {
   }
 
   // ----- rendering config per type -----
+  // CRITICAL: this method generates config values from the planet's RNG.
+  // Each call advances rng state, so calling it multiple times produces
+  // DIFFERENT cfg values (different seaLevel, cloudDensity, iceLine, etc).
+  // The renderer calls this every frame, which previously caused the planet's
+  // surface to pulsate as detail-noise thresholds, cloud density, and other
+  // cfg values silently jittered between frames. Memoize the first result so
+  // every later call returns the same object — surface stays stable.
   getTypeConfig() {
+    if (this._cfg) return this._cfg;
     const t = this.type;
     if (t === 'gas_giant' || t === 'ice_giant' || t === 'brown_dwarf') {
       const cfg = {
@@ -2380,6 +2462,7 @@ class Planet {
         cfg.stormChance = 0.4;
         cfg.selfEmit = true;  // hot interior glows even on the night side
       }
+      this._cfg = cfg;
       return cfg;
     }
     const cfg = {
@@ -2415,6 +2498,23 @@ class Planet {
       cfg.mountainAmount = 0.18;
       cfg.cloudDensity = 0.55;
       cfg.iceLine     = 0.65;
+    } else if (t === 'primordial') {
+      // Young Earth: continents ~30%, dense ash-tinted clouds, moderate
+      // bombardment legacy, and a low-frequency "magma province" map that
+      // marks where flood basalts and active lava lakes live. Vegetation
+      // is suppressed and only survives between flows.
+      cfg.seaLevel    = -0.02 + (this.rng() - 0.5) * 0.12;
+      cfg.mountainAmount = 0.30;
+      cfg.ridgeAmount = 0.20;
+      cfg.exponent    = 1.05;
+      cfg.cloudDensity = 0.55 + this.rng() * 0.20;  // dense ash-haze
+      cfg.iceLine     = 0.85 + this.rng() * 0.10;   // hot — ice rare
+      cfg.craterDensity = 0.30 + this.rng() * 0.30; // late-bombardment scars
+      cfg.polarBleach = 0.2;                         // poles barely cool
+      // Magma-province controls — fraction of the surface dominated by
+      // active flood basalts. Higher value = more lava, less vegetation.
+      cfg.magmaCoverage = 0.25 + this.rng() * 0.30;  // 25-55% of land
+      cfg.magmaScale    = 0.9 + this.rng() * 0.7;    // few large provinces
     } else if (t === 'desert') {
       cfg.seaLevel    = -10;  // no water
       cfg.ridgeAmount = 0.30;
@@ -2484,6 +2584,7 @@ class Planet {
       cfg.shapeOblateY = 0.85 + this.rng() * 0.10;    // 0.85..0.95 — slight squash
       cfg.shapeOblateX = 1.0;                          // no rotation-plane deformation
     }
+    this._cfg = cfg;
     return cfg;
   }
 
@@ -2560,6 +2661,10 @@ class Planet {
     const nOffX = this.rng() * 100;
     const nOffY = this.rng() * 100;
     const nOffZ = this.rng() * 100;
+    // Stash on planet so the renderer can use them for resolution-independent
+    // surface detail noise (sub-texel grit). Without this, every render-time
+    // detail call would produce the same pattern regardless of seed.
+    this.detailOffsets = [nOffX * 0.13, nOffY * 0.27, nOffZ * 0.41];
 
     if (cfg.kind === 'gas') {
       this.generateGasTexture(cfg, storms, nOffX, nOffY, nOffZ);
@@ -2636,8 +2741,17 @@ class Planet {
 
         heightMap[j * W + i] = h;
 
-        // Moisture (independent low-freq)
-        const m = clamp(this.perlin2.fbm(x*cfg.moistureScale+nOffZ, y*cfg.moistureScale+nOffX, z*cfg.moistureScale+nOffY, 4) * 1.4 + 0.5, 0, 1);
+        // Moisture (independent low-freq) — warped by heightmap so biome
+        // boundaries hug the terrain. Without warp, moisture noise floated
+        // independently of mountains/valleys, producing forests cut weirdly
+        // across ridge lines. With warp, wet zones cluster predictably with
+        // elevation features (rain shadows, orographic uplift, etc).
+        const hWarpM = (h - cfg.seaLevel) * 1.6;
+        const m = clamp(this.perlin2.fbm(
+          x*cfg.moistureScale + nOffZ + hWarpM * 0.5,
+          y*cfg.moistureScale + nOffX + hWarpM * 0.3,
+          z*cfg.moistureScale + nOffY + hWarpM * 0.5,
+          4) * 1.4 + 0.5, 0, 1);
         // Clouds — base pattern from embedded reference (NASA Blue Marble
         // cloud mosaic) for realistic cyclones / ITCZ band / mid-latitude
         // westerlies, perturbed per-planet by seam-safe domain warp and a
@@ -2718,6 +2832,26 @@ class Planet {
           // Fallback: pure-Perlin cloud field (original behavior)
           const c0 = this.perlin3.fbm(x*3.5+nOffY, y*3.5+nOffZ, z*3.5+nOffX, 5);
           cloud = clamp((c0 + 0.5) * cfg.cloudDensity * 1.5 - (1 - cfg.cloudDensity) * 0.2, 0, 1);
+        }
+        // Primordial planets: secondary "ash cloud" layer concentrated over
+        // active magma provinces. Where the magma map is high, boost cloud
+        // opacity (volcanism feeds atmospheric particulates) and write into
+        // ashMap so the renderer can tint those clouds dark/brown instead of
+        // the default cream. Outside provinces, ash is 0 and clouds render
+        // normally.
+        if (this.type === 'primordial' && this.ashMap) {
+          const mScale = cfg.magmaScale || 1.0;
+          const magmaRaw = this.perlin2.fbm(x * mScale + 200, y * mScale + 200, z * mScale + 200, 4);
+          const magmaThr = 0.5 - (cfg.magmaCoverage || 0.3) * 0.6;
+          const magma = clamp((magmaRaw - magmaThr) * 5, 0, 1);
+          // Spread ash slightly beyond the lava itself with a softer falloff,
+          // simulating downwind plumes and high-altitude carry.
+          const ashSpread = clamp((magmaRaw - magmaThr + 0.18) * 3, 0, 1);
+          this.ashMap[j * W + i] = ashSpread;
+          // Cloud thickening over active provinces
+          if (magma > 0.05) {
+            cloud = clamp(cloud + magma * 0.45, 0, 1);
+          }
         }
         cloudMap[j * W + i] = cloud;
 
@@ -2858,14 +2992,16 @@ class Planet {
     this.softenColorMap();
   }
 
-  // Mild separable 3-tap box blur on colorMap (radius 1, one pass).
-  // Smooths high-frequency content that aliases at sub-texel sample rates.
-  // Subtle enough that pixel-art crispness is preserved.
+  // Weighted [1,6,1]/8 separable blur on colorMap. Combined kernel center
+  // weight is 36/64 = 56%, vs the 11% (1/9) of an equal-weight 3×3 box.
+  // Strong enough to anti-alias sub-texel shimmer; gentle enough to keep
+  // biome boundaries, mountain bump shading, and high-freq surface texture
+  // from washing out into mush.
   softenColorMap() {
     const W = this.texW, H = this.texH;
     const src = this.colorMap;
     const tmp = new Uint8ClampedArray(src.length);
-    // Horizontal pass (wraps in U)
+    // Horizontal pass (wraps in U) — kernel [1,6,1]/8
     for (let j = 0; j < H; j++) {
       const row = j * W;
       for (let i = 0; i < W; i++) {
@@ -2873,20 +3009,20 @@ class Planet {
         const ip = (i + 1) % W;
         const a = (row + im) * 3, b = (row + i) * 3, c = (row + ip) * 3;
         const o = b;
-        tmp[o]     = (src[a]     + src[b]     + src[c])     / 3;
-        tmp[o + 1] = (src[a + 1] + src[b + 1] + src[c + 1]) / 3;
-        tmp[o + 2] = (src[a + 2] + src[b + 2] + src[c + 2]) / 3;
+        tmp[o]     = (src[a]     + src[b]     * 6 + src[c])     / 8;
+        tmp[o + 1] = (src[a + 1] + src[b + 1] * 6 + src[c + 1]) / 8;
+        tmp[o + 2] = (src[a + 2] + src[b + 2] * 6 + src[c + 2]) / 8;
       }
     }
-    // Vertical pass (clamps in V)
+    // Vertical pass (clamps in V) — kernel [1,6,1]/8
     for (let j = 0; j < H; j++) {
       const jm = j > 0 ? j - 1 : 0;
       const jp = j < H - 1 ? j + 1 : H - 1;
       for (let i = 0; i < W; i++) {
         const a = (jm * W + i) * 3, b = (j * W + i) * 3, c = (jp * W + i) * 3;
-        src[b]     = (tmp[a]     + tmp[b]     + tmp[c])     / 3;
-        src[b + 1] = (tmp[a + 1] + tmp[b + 1] + tmp[c + 1]) / 3;
-        src[b + 2] = (tmp[a + 2] + tmp[b + 2] + tmp[c + 2]) / 3;
+        src[b]     = (tmp[a]     + tmp[b]     * 6 + tmp[c])     / 8;
+        src[b + 1] = (tmp[a + 1] + tmp[b + 1] * 6 + tmp[c + 1]) / 8;
+        src[b + 2] = (tmp[a + 2] + tmp[b + 2] * 6 + tmp[c + 2]) / 8;
       }
     }
   }
@@ -2965,6 +3101,90 @@ class Planet {
       const crack = this.worley.noise(x*8+10, y*8+10, z*8+10);
       if (crack < 0.05 && h > cfg.seaLevel && h < 0.2) {
         col = mixRgb(col, lavaPal.lavaHot, (0.05 - crack) * 12);
+      }
+      return col;
+    }
+
+    // ----- PRIMORDIAL -----
+    // Young Earth-like: water (where below sea), vegetation/basalt on land,
+    // and a 3D "magma province" map carved out of the surface. In magma
+    // provinces, low-elevation land becomes lava lakes; higher ground is
+    // scorched basalt; vegetation is suppressed. Outside magma provinces,
+    // the surface looks like sparse-life early Earth.
+    if (this.type === 'primordial') {
+      const pp = this.palette;
+      // Magma province map — low-frequency 3D Perlin gating where flood
+      // basalts dominate. Threshold against magmaCoverage so a planet's
+      // overall lava coverage matches the seed's magmaCoverage value.
+      // (mScale is fed from cfg.magmaScale so seeds vary in province size.)
+      const mScale = cfg.magmaScale || 1.0;
+      const magmaRaw = this.perlin2.fbm(x * mScale + 200, y * mScale + 200, z * mScale + 200, 4);
+      // Threshold: high values = active magma. magmaCoverage=0.4 means about
+      // 40% of the surface area is in a province; that fraction of `magmaRaw`
+      // crosses the threshold.
+      const magmaThr = 0.5 - (cfg.magmaCoverage || 0.3) * 0.6;
+      const magma = clamp((magmaRaw - magmaThr) * 5, 0, 1);
+
+      // ---- Water (only outside magma provinces; provinces eat the sea) ----
+      if (h < cfg.seaLevel && magma < 0.4) {
+        const depth = clamp((cfg.seaLevel - h) / 0.45, 0, 1);
+        let water = mixRgb(pp.shore, pp.water, smoothstep(0, 0.15, depth));
+        water = mixRgb(water, pp.deepWater, smoothstep(0.2, 0.7, depth));
+        // No bright shore foam — primitive seas look murkier
+        return water;
+      }
+
+      // ---- Lava lake (low ground, inside magma province) ----
+      if (h < cfg.seaLevel + 0.04 && magma > 0.4) {
+        // How "deep" we are into the province AND how low the elevation —
+        // both push toward hot lava. Province edges are cooler crust.
+        const depthBelow = clamp((cfg.seaLevel + 0.04 - h) / 0.20, 0, 1);
+        const heatFactor = magma * (0.5 + depthBelow * 0.5);
+        // Hot rivers in deepest, most-magmatic spots; cool basalt in shallows
+        let col = mixRgb(pp.basalt, pp.lava, heatFactor);
+        if (heatFactor > 0.7) {
+          col = mixRgb(col, pp.lavaHot, smoothstep(0.7, 1.0, heatFactor));
+        }
+        return col;
+      }
+
+      // ---- Land (sparse vegetation + basalt + lava-province scarring) ----
+      const aboveSea = h - cfg.seaLevel;
+      // Base biome by altitude — primitive vegetation in lowlands
+      let col;
+      if (aboveSea < 0.05)        col = mixRgb(pp.beach, pp.lowland, smoothstep(0, 0.05, aboveSea));
+      else if (aboveSea < 0.15)   col = mixRgb(pp.lowland, pp.plains, (aboveSea - 0.05) / 0.10);
+      else if (aboveSea < 0.35)   col = mixRgb(pp.plains, pp.hills, (aboveSea - 0.15) / 0.20);
+      else if (aboveSea < 0.6)    col = mixRgb(pp.hills, pp.mountain, (aboveSea - 0.35) / 0.25);
+      else                         col = mixRgb(pp.mountain, pp.peak, smoothstep(0.6, 0.9, aboveSea));
+
+      // Vegetation density modulator — moisture biases toward lush forest in
+      // wet lowlands; fades out toward poles, mountains, and dry interiors.
+      if (aboveSea > 0 && aboveSea < 0.4 && m > 0.45) {
+        const veg = smoothstep(0.45, 0.75, m) * smoothstep(0.40, 0.10, aboveSea) * (1 - magma);
+        col = mixRgb(col, pp.forest, veg * 0.55);
+      }
+
+      // Magma-province darkening — even ABOVE sea level, scorched land near
+      // active flows reads as ash-stained basalt with rare vegetation.
+      if (magma > 0.2) {
+        const scorch = smoothstep(0.2, 0.7, magma);
+        col = mixRgb(col, pp.basalt, scorch * 0.85);
+        // Hot crust cracks — Worley network producing glowing fissures
+        // through province interiors.
+        if (magma > 0.6) {
+          const crack = this.worley.noise(x * 10 + 40, y * 10 + 40, z * 10 + 40);
+          if (crack < 0.06) {
+            col = mixRgb(col, pp.lavaHot, (0.06 - crack) * 12);
+          }
+        }
+      }
+
+      // Polar bleach — minimal, since primordial planets are hot. Just a
+      // hint of dirty ice on the absolute pole.
+      if (absLat > cfg.iceLine - 0.04) {
+        col = mixRgb(col, pp.polarIce,
+          smoothstep(cfg.iceLine - 0.04, cfg.iceLine + 0.06, absLat) * cfg.polarBleach);
       }
       return col;
     }
@@ -3936,6 +4156,29 @@ class Renderer {
     const cloudColor = (cfg.kind === 'gas') ? null : pal.cloudCol;
     const seaLevel = cfg.seaLevel;
 
+    // Primordial ash overlay — clouds over magma provinces shift toward a
+    // dark/brown tint and stay denser. ashMap is null for non-primordial
+    // bodies, in which case the renderer skips the entire ash blend.
+    const ashMap = planet.ashMap || null;
+    const ashCloudColor = ashMap ? (pal.ashCloud || [60, 45, 35]) : null;
+
+    // Render-time detail noise — adds resolution-independent sub-texel grit
+    // to rocky surfaces. The texture map is 768×384 baked: when each rendered
+    // pixel covers <1 texel, bilinear sampling smooths everything into mush.
+    // Sampling one octave of Perlin at high frequency in world space gives
+    // crisp surface micro-texture that survives any zoom level. Disabled for
+    // gas bodies (they have their own banded structure) and ice (the smooth
+    // ice cap should stay smooth).
+    const detailEnabled = (cfg.kind === 'rocky' && planet.type !== 'ice');
+    const detailPerlin = planet.perlin;          // hoist for inner loop
+    const dOff = planet.detailOffsets || [0, 0, 0];
+    const dOX = dOff[0], dOY = dOff[1], dOZ = dOff[2];
+    // Detail strength varies by surface kind: more on rough/rocky terrain,
+    // less on smooth water bodies (where it would read as JPEG noise).
+    const DETAIL_FREQ = 22;        // texels of detail across the body
+    const DETAIL_AMP_LAND = 0.09;  // ±9% brightness — strong micro-texture
+    const DETAIL_AMP_WATER = 0.025; // ±2.5% — barely-perceptible water grain
+
     // Asteroid / dwarf-planet shape parameters — bring into local scope so
     // the per-pixel inner loop doesn't pay a property-lookup cost.
     const shapeMap = planet.shapeMap;       // null for spherical bodies
@@ -3964,23 +4207,34 @@ class Renderer {
             data[idx4 + 3] = 0;
             continue;
           }
-          // Compute world direction at sphere assumption (dz from r2<1)
-          const dz_sphere = (r2 < 1) ? Math.sqrt(1 - r2) : 0;
-          const _ty = dy * cosTilt - dz_sphere * sinTilt;
-          const _tz = dy * sinTilt + dz_sphere * cosTilt;
-          const _wx = dx * cosT + _tz * sinT;
-          const _wy = _ty;
-          const _wz = -dx * sinT + _tz * cosT;
-          // Convert to (lat, lon) for shape map sampling
-          const wL = Math.sqrt(_wx*_wx + _wy*_wy + _wz*_wz);
-          if (wL < 0.0001) {
-            shapeR = maxShapeR;
-          } else {
+          // Iterative shape lookup (2 iterations).
+          //
+          // The challenge: at screen position (dx,dy), we want the world
+          // direction of the ACTUAL surface point — but that depends on dz
+          // which depends on shapeR which we're trying to find. The original
+          // single-pass version used dz=sqrt(1-r²) (sphere assumption) which
+          // gives the right direction only IF the body is a unit sphere. For
+          // an asteroid with bulges in dark regions, the sphere lookup
+          // returned a shapeR for the WRONG direction — typically smaller
+          // than the actual local radius — causing the silhouette test to
+          // reject pixels that should be inside the bulge. The visible
+          // symptom was clean concave bites taken out of the dark side.
+          //
+          // Fix: after the first lookup, recompute dz from the looked-up
+          // shapeR and re-sample. Two iterations converges close enough.
+          let dz_guess = (r2 < 1) ? Math.sqrt(1 - r2) : 0;
+          for (let iter = 0; iter < 2; iter++) {
+            const _ty = dy * cosTilt - dz_guess * sinTilt;
+            const _tz = dy * sinTilt + dz_guess * cosTilt;
+            const _wx = dx * cosT + _tz * sinT;
+            const _wy = _ty;
+            const _wz = -dx * sinT + _tz * cosT;
+            const wL = Math.sqrt(_wx*_wx + _wy*_wy + _wz*_wz);
+            if (wL < 0.0001) { shapeR = maxShapeR; break; }
             const slat = Math.asin(clamp(_wy / wL, -1, 1));
             const slon = Math.atan2(_wz, _wx);
             const su = (slon / (Math.PI * 2)) + 0.5;
             const sv = (slat / Math.PI) + 0.5;
-            // Bilinear sample of shape map
             const fu = su * SMW - 0.5;
             const fv = sv * SMH - 0.5;
             const i0 = Math.floor(fu);
@@ -3999,6 +4253,11 @@ class Renderer {
                    + s10 * fx       * (1 - fy)
                    + s01 * (1 - fx) * fy
                    + s11 * fx       * fy;
+            // Refine dz from this shapeR estimate. If shapeR² <= r², we're
+            // outside; bail out (the silhouette test below will reject).
+            const sR2 = shapeR * shapeR;
+            if (sR2 <= r2) break;
+            dz_guess = Math.sqrt(sR2 - r2);
           }
         }
         const shapeR2 = shapeR * shapeR;
@@ -4094,6 +4353,34 @@ class Renderer {
         // Bilinear height (used by specular + lava glow)
         const hSample = heightMap[t00] * w00 + heightMap[t10] * w10
                       + heightMap[t01] * w01 + heightMap[t11] * w11;
+
+        // ---- Render-time detail noise — sub-texel surface grit ----
+        // World-space Perlin at high frequency. World coords (wx,wy,wz) are
+        // already in the planet's rotating frame so the pattern stays glued
+        // to the surface as the planet spins. Single octave keeps cost low
+        // (~one Perlin call per surface pixel). Less amplitude over water
+        // since water should look smooth-ish.
+        //
+        // Heightmap warp — offsetting the noise input by the local height
+        // makes the detail pattern FOLLOW underlying topography rather than
+        // floating independently of it. Classic Terragen "power-fractal
+        // colorize" technique: noise warped by heightmap reads as geologic
+        // banding rather than random TV static. Mountain ridges develop
+        // their own noise signature; valleys develop a different one.
+        if (detailEnabled) {
+          const hWarp = (hSample - seaLevel) * 6;  // strength of warp
+          const dn = detailPerlin.fbm(
+            wx * DETAIL_FREQ + dOX + hWarp,
+            wy * DETAIL_FREQ + dOY + hWarp * 0.5,
+            wz * DETAIL_FREQ + dOZ + hWarp,
+            1
+          );
+          const amp = (hSample < seaLevel) ? DETAIL_AMP_WATER : DETAIL_AMP_LAND;
+          const detailMul = 1 + dn * amp;
+          cr *= detailMul;
+          cg *= detailMul;
+          cb *= detailMul;
+        }
 
         // Lighting model — ambient is mostly reflected/scattered sunlight,
         // so it scales with sun brightness AND inherits sun color. A tiny
@@ -4219,10 +4506,28 @@ class Renderer {
             // Cloud opacity IS the reference luminance — no boost so the
             // grey gradient renders as soft haze rather than getting clipped
             const a = cv > 1 ? 1 : cv;
+            // Ash-tint blend (primordial only) — sample ashMap bilinearly
+            // with the same cloud rotation offset, then mix the cream
+            // cloudColor toward the dark ashCloudColor based on ash density.
+            // This produces visible dark plumes drifting downwind of lava
+            // provinces over otherwise-cream cloud cover.
+            let ccR = cloudColor[0], ccG = cloudColor[1], ccB = cloudColor[2];
+            if (ashMap) {
+              const ash = ashMap[j0 * TW + ci0] * cw00
+                        + ashMap[j0 * TW + ci1] * cw10
+                        + ashMap[j1 * TW + ci0] * cw01
+                        + ashMap[j1 * TW + ci1] * cw11;
+              if (ash > 0.02) {
+                const ashMix = ash > 1 ? 1 : ash;
+                ccR = ccR * (1 - ashMix) + ashCloudColor[0] * ashMix;
+                ccG = ccG * (1 - ashMix) + ashCloudColor[1] * ashMix;
+                ccB = ccB * (1 - ashMix) + ashCloudColor[2] * ashMix;
+              }
+            }
             // Per-channel cloud lighting too
-            cr = cr * (1 - a) + cloudColor[0] * litR * a;
-            cg = cg * (1 - a) + cloudColor[1] * litG * a;
-            cb = cb * (1 - a) + cloudColor[2] * litB * a;
+            cr = cr * (1 - a) + ccR * litR * a;
+            cg = cg * (1 - a) + ccG * litG * a;
+            cb = cb * (1 - a) + ccB * litB * a;
           }
         }
 
@@ -4583,6 +4888,7 @@ function setUI(planet) {
 
   els.dWater.textContent = (planet.type === 'ocean') ? 'GLOBAL'
     : (planet.type === 'terrestrial') ? 'LIQUID'
+    : (planet.type === 'primordial') ? 'LIQUID + LAVA'
     : (planet.type === 'ice') ? 'FROZEN'
     : (planet.type === 'volcanic') ? 'NONE / LAVA'
     : (planet.type === 'gas_giant' || planet.type === 'ice_giant') ? 'N/A'
