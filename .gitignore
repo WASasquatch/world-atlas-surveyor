@@ -144,3 +144,6 @@ vite.config.ts.timestamp-*
 
 # Windows Zone Identifier
 *:Zone.Identifier
+
+# Temporary files
+tmp/
