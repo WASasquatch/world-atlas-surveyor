@@ -216,6 +216,7 @@ select {
 
 input[type="range"] {
   flex: 1;
+  min-width: 0;   /* allow shrink below intrinsic width so paired sliders (TARGETS / cloud DECKS) don't overflow the panel */
   -webkit-appearance: none;
   background: transparent;
   height: 14px;

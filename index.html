@@ -99,6 +99,35 @@
             <option value="4">4× SSAA</option>
           </select>
         </div>
+        <div class="input-row" style="margin-top:4px;" title="Generation resolution — the size every baked map (terrain, erosion, colour, clouds) is generated at. Higher = crisper terrain, coasts, rivers, and sharper exports, but a heavier bake. Re-generates on change.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">MAP RES</span>
+          <select id="genRes" style="flex:1;">
+            <option value="768" selected>768 (fast)</option>
+            <option value="1024">1024</option>
+            <option value="1536">1536</option>
+            <option value="2048">2048 (ultra)</option>
+          </select>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="PREVIEW mode — fast iteration: bakes at 768, forces the Low quality tier and chunky 3× pixels with no AA. Turn OFF for a full-resolution, full-quality render to view or export.">
+          <input type="checkbox" id="previewMode">
+          <span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">PREVIEW (fast, low-res)</span>
+        </div>
+        <div class="tf-cat" style="margin-top:8px;">POST FX <span style="color:var(--text-dim);font-weight:normal;">· GL</span></div>
+        <div class="input-row" title="Bloom strength — glow bleed from bright highlights (sun glints, lava, emission).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">BLOOM</span>
+          <input type="range" id="fxBloom" min="0" max="150" value="55" step="5">
+          <span class="value-display" id="fxBloomVal">0.55×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Chromatic aberration — lens RGB split that grows toward the limb.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">CHROMA</span>
+          <input type="range" id="fxChroma" min="0" max="100" value="0" step="5">
+          <span class="value-display" id="fxChromaVal">0%</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Film grain / dither — subtle animated noise that breaks up banding on smooth gradients (atmosphere, gas bands).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">GRAIN</span>
+          <input type="range" id="fxGrain" min="0" max="100" value="0" step="5">
+          <span class="value-display" id="fxGrainVal">0%</span>
+        </div>
         <div class="input-row" style="margin-top:4px;">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SPIN</span>
           <input type="checkbox" id="autoRotate" checked>

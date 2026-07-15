@@ -54,7 +54,7 @@ class TerraformPanel {
   }
 
   attach(glRenderer, planet) {
-    const prevPlanet = this.planet;
+    const prevType = this.planet ? this.planet.type : null;
     this.gl = glRenderer;
     this.planet = planet;
     const cfg = planet ? planet.getTypeConfig() : null;
@@ -64,12 +64,20 @@ class TerraformPanel {
       tempC: planet.attributes.tempC,
       pressureAtm: planet.attributes.pressureAtm,
     } : null;
-    // Only wipe the sliders for a genuinely NEW planet. A same-planet re-attach
-    // (enhanced↔classic mode toggle) must PRESERVE the user's terraform edits
-    // and re-push them to the (re)attached GL renderer — otherwise switching
-    // renderers silently resets every terraform setting.
-    if (planet !== prevPlanet) this.reset(false);
-    else if (glRenderer && planet) this.apply();
+    // Reset the sliders ONLY when the planet TYPE changes — each type preset has
+    // its own sensible defaults. Every other re-attach must PRESERVE the user's
+    // edits: a new SEED, a PREVIEW toggle, a gen-resolution / quality change, or
+    // an enhanced↔classic mode switch all regenerate the SAME type and should
+    // keep flow/churn/vortex/atmosphere/clouds/terrain exactly as the user set
+    // them. We re-push the live uniforms and, if the user had dirtied the
+    // terrain, re-carve the fresh heightmap with their erosion/evolve/detail.
+    const typeChanged = !prevType || !planet || planet.type !== prevType;
+    if (typeChanged) {
+      this.reset(false);
+    } else if (glRenderer && planet) {
+      this.apply();
+      if (this._terrainDirty) this.applyTerrain();
+    }
     this.setAvailable(!!glRenderer && !!planet);
   }
 
@@ -96,15 +104,23 @@ class TerraformPanel {
       // vortex / churn / cloud / atmos / procedural clouds: every GL body
       const waterRocky = cfg.kind === 'rocky' &&
         (this.planet.type === 'terrestrial' || this.planet.type === 'ocean' || this.planet.type === 'primordial');
-      setEnabled(els.tfRivers, waterRocky);
-      setEnabled(els.tfErosion, waterRocky);
-      setEnabled(els.tfDetail, waterRocky);
+      // volcanic + ice also erode (lava / glacial channels), so RIVERS / EROSION
+      // / DETAIL apply to them too — only continent EVOLVE stays water-world only.
+      const erodeRocky = waterRocky || this.planet.type === 'volcanic' || this.planet.type === 'ice';
+      setEnabled(els.tfRivers, erodeRocky);
+      setEnabled(els.tfErosion, erodeRocky);
+      setEnabled(els.tfDetail, erodeRocky);
       setEnabled(els.tfEvolve, waterRocky);
       setEnabled(els.tfEvolveScale, waterRocky);
       setEnabled(els.tfIterations, isGas);
-      for (const el of [els.tfVortex, els.tfChurn, els.tfCloud, els.tfCloudCover, els.tfAtmo, els.tfAtmoDensity,
-                        els.tfCloudAltLow, els.tfCloudAltMid, els.tfCloudAltHigh, els.tfCloudAmtLow, els.tfCloudAmtMid, els.tfCloudAmtHigh,
-                        els.tfCloudScatter, els.tfCloudFlow, els.tfCloudSeed]) setEnabled(el, true);
+      // VORTEX / CHURN / ATMOSPHERE apply to every GL body (they drive the gas
+      // flow too). The terrestrial CLOUD system (opacity/cover/decks/scatter/
+      // flow/seed) does NOT apply to gas kinds — gas has its own banded deck
+      // from the flow sim — so disable those on gas.
+      for (const el of [els.tfVortex, els.tfChurn, els.tfAtmo, els.tfAtmoDensity]) setEnabled(el, true);
+      for (const el of [els.tfCloud, els.tfCloudCover, els.tfCloudAltLow, els.tfCloudAltMid, els.tfCloudAltHigh,
+                        els.tfCloudAmtLow, els.tfCloudAmtMid, els.tfCloudAmtHigh,
+                        els.tfCloudScatter, els.tfCloudFlow, els.tfCloudSeed]) setEnabled(el, !isGas);
     }
   }
 
@@ -122,8 +138,12 @@ class TerraformPanel {
     els.tfEvolve.value = 0;
     els.tfEvolveScale.value = 50;
     els.tfSnow.value = 0;
-    els.tfVortex.value = 50;
-    els.tfChurn.value = 100;
+    // Cloud-flow defaults are tuned for GAS GIANTS (strong churning bands). On
+    // rocky/terrestrial worlds that reads as an over-warped "ripple show", so
+    // default those low: FLOW 0.1×, VORTEX 0.2×, CHURN 0.3× (gas keeps 1.0×).
+    const gasT = !!(this.planet && this.planet.getTypeConfig && this.planet.getTypeConfig().kind === 'gas');
+    els.tfVortex.value = gasT ? 50 : 15;   // 15 → ~0.2× (0.1·100^(v/100))
+    els.tfChurn.value = gasT ? 100 : 30;   // 0.3×
     els.tfGasDensity.value = 100;
     els.tfGasScale.value = 50;
     els.tfGasTurb.value = 50;
@@ -134,7 +154,7 @@ class TerraformPanel {
     els.tfErosion.value = 100;
     els.tfDetail.value = 50;
     els.tfIterations.value = 16;
-    if (els.tfCloudFlow) els.tfCloudFlow.value = 100;
+    if (els.tfCloudFlow) els.tfCloudFlow.value = gasT ? 100 : 10;   // 0.1× on rocky worlds
     if (els.tfCloudSeed) els.tfCloudSeed.value = 0;
     const wasDirty = this._terrainDirty;
     if (apply) {
@@ -144,7 +164,10 @@ class TerraformPanel {
       if (wasDirty) this.applyTerrain(); else this._terrainDirty = false;
     } else {
       this._terrainDirty = false;   // fresh planet on attach — terrain is base
-      this.refreshLabels();
+      // push the (type-aware) reset slider values into the live uniforms so the
+      // defaults actually take effect — otherwise the render keeps the renderer's
+      // generic tf defaults (e.g. FLOW/VORTEX/CHURN 1.0×) and ignores the sliders.
+      if (this.gl && this.planet) this.apply(); else this.refreshLabels();
     }
   }
 

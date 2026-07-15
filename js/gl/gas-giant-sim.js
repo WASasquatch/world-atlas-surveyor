@@ -98,7 +98,10 @@ void main() {
   vec3 dir = uvToDir(vUv);
   // jitter band edges so the stripes aren't perfect circles
   float j = fbm4(vec4(dir * 3.0, uSeedOffset), 3, 0.5);
-  float t = clamp(vUv.y + j * uJitter, 0.0, 1.0);
+  // low-freq MEANDER — the zonal bands wave and pinch like real jet streams
+  // instead of ruler-straight rings, giving the shear undulating boundaries.
+  float meander = fbm4(vec4(dir * vec3(2.0, 1.15, 2.0) + 50.0, uSeedOffset), 4, 0.55) * (0.05 + 0.07 * uDetail);
+  float t = clamp(vUv.y + j * uJitter + meander, 0.0, 1.0);
   float per = uBandCount - 1.0;
   float fi = t * per * uStripeFreq;                 // stripeFreq scales ring count
   float m = mod(fi, per);
@@ -109,14 +112,27 @@ void main() {
   float e = 0.12 - 0.09 * uDetail;                  // 0.12 (soft) .. 0.03 (crisp)
   float f = smoothstep(0.5 - e, 0.5 + e, fract(m));
   vec3 col = mix(uBandColors[i0], uBandColors[i1], f);
-  // multi-octave detail — because ADVECT re-seeds toward uInitDye every step,
-  // whatever structure lives here is continuously refreshed and sheared into
-  // persistent filaments rather than diffusing away.
-  float d = fbm4(vec4(dir * (18.0 + 40.0 * uDetail), uSeedOffset), 3, 0.6);
-  col *= 1.0 + (0.08 + 0.22 * uDetail) * d;
+  // DOMAIN-WARPED multi-scale turbulence — because ADVECT re-seeds toward
+  // uInitDye every step, whatever structure lives here is continuously refreshed
+  // and sheared into persistent filaments. Warp the sample direction by a
+  // low-freq field, then stack many octaves so the base carries chaotic eddies
+  // and filaments at EVERY scale (rich material for the flow to fold), not one
+  // smooth gradient.
+  vec3 warp = vec3(
+    fbm4(vec4(dir * 1.8 + 10.0, uSeedOffset), 3, 0.5),
+    fbm4(vec4(dir * 1.8 + 20.0, uSeedOffset), 3, 0.5),
+    fbm4(vec4(dir * 1.8 + 30.0, uSeedOffset), 3, 0.5));
+  vec3 wdir = dir + warp * (0.12 + 0.30 * uDetail);
+  float turb = fbm4(vec4(wdir * (14.0 + 44.0 * uDetail), uSeedOffset), 5, 0.62);
+  col *= 1.0 + (0.10 + 0.28 * uDetail) * turb;
   // anisotropic streaks (fine in longitude, broad in latitude) that the zonal
   // shear stretches lengthwise into GG-style banded filaments
   col *= 1.0 + 0.12 * uDetail * snoise3(dir * vec3(64.0, 7.0, 64.0) + uSeedOffset);
+  // large oval STORM vortices (Great-Red-Spot-like) — warm-tinted eddies the
+  // flow catches and spins up into persistent rotating features
+  float spotN = fbm4(vec4(dir * vec3(3.2, 4.6, 3.2) + 200.0, uSeedOffset), 3, 0.5) * 0.5 + 0.5;
+  float spot = smoothstep(0.70, 0.86, spotN);
+  col = mix(col, col * vec3(1.18, 0.92, 0.72), spot * (0.35 + 0.35 * uDetail));
   outColor = vec4(col, 1.0);
 }
 `;
@@ -427,7 +443,10 @@ class GasGiantSim {
     this.bandColors = (cols && cols.length === 8) ? cols : this._paletteBandColors;
     this.initMat.uniforms.uBandColors.value = this.bandColors;
     this.renderPass(this.initMat, this.initRT);
-    this._injectBoost = 90;
+    // Gentler injection than a full re-seed so the NEW colours migrate into the
+    // live flow over ~1s WITHOUT snapping the developed filament pattern back to
+    // the init layout (which read as the flow "resetting" on every colour tweak).
+    this._injectBoost = 48;
   }
 
   // ITERATIONS — develop the flow to exactly n advection steps from the seed.

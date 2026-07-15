@@ -92,6 +92,11 @@ function generate() {
       // type/atmosphere/size/variant. Earth wins if both match (won't happen
       // since EARTH isn't in EASTER_EGGS, but defensive ordering).
       const egg = !isEarth ? EASTER_EGGS[seedUpper] : null;
+      // MAP RES — generation resolution for every baked map (terrain/erosion/
+      // colour/cloud). PREVIEW mode forces the fast 768 baseline; otherwise use
+      // the selected size (up to 2048) for a full-quality bake to view/export.
+      const previewOn = !!(els.previewMode && els.previewMode.checked);
+      const genRes = previewOn ? 768 : (els.genRes ? parseInt(els.genRes.value, 10) || 768 : 768);
       const planet = new Planet({
         seed,
         type:       isEarth ? 'terrestrial' : (egg ? egg.type       : els.planetType.value),
@@ -99,6 +104,7 @@ function generate() {
         size:       isEarth ? 0.50          : (egg ? egg.size       : parseInt(els.size.value, 10) / 100),
         earthMode:  isEarth,
         forceVariant: egg ? egg.forceVariant : null,
+        mapRes:     genRes,
       });
       // Reflect Earth state in the UI controls so the user sees what's set
       if (isEarth) {
@@ -138,8 +144,18 @@ function generate() {
 function fitRenderer() {
   const vp = els.planetCanvas.parentElement;
   const rect = vp.getBoundingClientRect();
-  const aa = els.antialias ? (parseInt(els.antialias.value, 10) || 1) : 1;
-  renderer.resize(rect.width, rect.height, parseInt(els.pixelScale.value, 10), aa);
+  const previewOn = !!(els.previewMode && els.previewMode.checked);
+  // PREVIEW: chunky 3× pixels + AA off for fast iteration; otherwise honor the sliders.
+  const ps = previewOn ? 3 : parseInt(els.pixelScale.value, 10);
+  const aa = previewOn ? 1 : (els.antialias ? (parseInt(els.antialias.value, 10) || 1) : 1);
+  renderer.resize(rect.width, rect.height, ps, aa);
+}
+
+// Quality tier from the UI, with PREVIEW forcing the Low preset for speed.
+function applyQualityFromUI() {
+  if (els.previewMode && els.previewMode.checked) { Quality.set('low'); return; }
+  const v = els.quality.value;
+  if (v === 'auto') Quality.enableAuto(); else Quality.set(v);
 }
 
 // ---------- inputs ----------
@@ -157,10 +173,15 @@ els.seed.addEventListener('keydown', (e) => { if (e.key === 'Enter') generate();
 els.renderMode.addEventListener('change', () => applyRenderMode(els.renderMode.value));
 
 // Quality select — 'auto' probes up/down from frame timings; a named tier freezes it.
-els.quality.addEventListener('change', () => {
-  const v = els.quality.value;
-  if (v === 'auto') Quality.enableAuto();
-  else Quality.set(v);
+els.quality.addEventListener('change', applyQualityFromUI);
+// Generation resolution — re-bake at the new size.
+if (els.genRes) els.genRes.addEventListener('change', generate);
+// PREVIEW — fast low-res/chunky iteration; toggling re-applies quality, the
+// chunky pixel size, and re-bakes at the preview (768) vs full resolution.
+if (els.previewMode) els.previewMode.addEventListener('change', () => {
+  applyQualityFromUI();
+  fitRenderer();
+  generate();
 });
 
 // Animation export
@@ -257,6 +278,20 @@ els.pixelScale.addEventListener('input', () => {
   fitRenderer();
 });
 if (els.antialias) els.antialias.addEventListener('change', fitRenderer);
+// POST FX (GL composite): bloom / chromatic aberration / film grain
+function applyPostFX() {
+  if (!glRenderer) return;
+  const bloom = parseInt(els.fxBloom.value, 10) / 100;
+  const chroma = parseInt(els.fxChroma.value, 10) / 100;
+  const grain = parseInt(els.fxGrain.value, 10) / 100;
+  glRenderer.postFX.bloom = bloom;
+  glRenderer.postFX.chroma = chroma;
+  glRenderer.postFX.grain = grain;
+  els.fxBloomVal.textContent = bloom.toFixed(2) + '×';
+  els.fxChromaVal.textContent = Math.round(chroma * 100) + '%';
+  els.fxGrainVal.textContent = Math.round(grain * 100) + '%';
+}
+if (els.fxBloom) { for (const el of [els.fxBloom, els.fxChroma, els.fxGrain]) el.addEventListener('input', applyPostFX); applyPostFX(); }
 els.autoRotate.addEventListener('change', () => {
   renderer.autoRotate = els.autoRotate.checked;
 });

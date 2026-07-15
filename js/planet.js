@@ -57,9 +57,14 @@ class Planet {
 
     this.attributes = this.computeAttributes();
 
-    // texture maps (equirectangular)
-    this.texW = 768;
-    this.texH = 384;
+    // texture maps (equirectangular, 2:1). Resolution is a generation parameter
+    // (MAP RES): 768 default, up to 2048. Higher = crisper terrain/coasts/rivers
+    // and sharper exports, at more bake time + memory. Same seed at the SAME
+    // resolution is bit-identical; a different resolution is a different sampling
+    // grid, so it's a distinct (but still deterministic) world.
+    const mapW = Math.max(384, Math.min(2048, (config.mapRes | 0) || 768));
+    this.texW = mapW;
+    this.texH = mapW >> 1;
     const N = this.texW * this.texH;
     this.heightMap = new Float32Array(N);
     this.moistureMap = new Float32Array(N);  // biome moisture — read by the GL terraform shader
@@ -616,25 +621,39 @@ class Planet {
     // relief, water mask, and river flow map all describe the SAME carved
     // terrain. Deterministic per seed; droplet count follows the quality tier.
     const waterType = this.type === 'terrestrial' || this.type === 'ocean' || this.type === 'primordial';
+    // Volcanic and ice worlds ALSO erode — lava carves channels (rivers of
+    // lava!), glaciers carve valleys — just gentler by default than a wet world.
+    const eroType = waterType || this.type === 'volcanic' || this.type === 'ice';
     this.baseHeightMap = null;
-    if (cfg.kind === 'rocky' && waterType) {
+    if (cfg.kind === 'rocky' && eroType) {
       this.baseHeightMap = new Float32Array(this.heightMap);   // clean base for the live EROSION slider
       // pristine seed moisture so EVOLVE is reversible: bakeMoisture() overwrites
       // this.moistureMap for evolved coastlines; dialing EVOLVE back to 0 restores
       // the generated biome layout from this backup (see reTerrain).
       if (this.moistureMap) this.baseMoistureMap = new Float32Array(this.moistureMap);
-      const { height, flow } = erodeMultiRes(this.heightMap, W, H, {
+      const eroOpts = {
         seed: this.seedNum,
         seaLevel: cfg.seaLevel,
         // FIXED droplet count (not the live/auto quality tier) so a seed
         // erodes to identical terrain on every machine — "same seed = same
         // world" must not depend on hardware or on when auto-detect stepped.
-        droplets: 50000,
+        // Scale with pixel count so erosion DENSITY is constant across MAP RES
+        // (768² → 50k; higher res gets proportionally more droplets).
+        droplets: Math.round(50000 * (W * H) / (768 * 384)),
         // Coarse→fine pyramid: broad continental drainage + crisp fluvial cuts.
         // Default DETAIL (0.5) is fixed here so the initial generate stays
         // deterministic; the DETAIL slider drives it live via reTerrain().
         detail: 0.5,
-      });
+      };
+      // Water worlds keep the original (unscaled) carve — untouched for
+      // determinism. Volcanic/ice get a lighter default so the channels read
+      // as lava/glacial cuts rather than a full hydraulic drainage basin.
+      // Persist the per-type base scale so the live EROSION slider's neutral
+      // 1.0× reproduces THIS generated carve (see reTerrain) — otherwise the
+      // first terraform edit / RESET would re-carve volcanic/ice deeper.
+      this._eroBaseScale = waterType ? 1 : (this.type === 'volcanic' ? 0.8 : 0.5);
+      if (!waterType) eroOpts.erosionScale = this._eroBaseScale;
+      const { height, flow } = erodeMultiRes(this.heightMap, W, H, eroOpts);
       this.heightMap = height;
       this.flowMap = flow;
     } else {
@@ -884,9 +903,11 @@ class Planet {
       const { height, flow } = erodeMultiRes(working, W, H, {
         seed: this.seedNum,
         seaLevel: cfg.seaLevel,
-        droplets: 50000,
+        droplets: Math.round(50000 * (W * H) / (768 * 384)),
         detail: (detail == null ? 0.5 : detail),
-        erosionScale: erosionStrength,
+        // fold in the per-type base scale (volcanic 0.8 / ice 0.5 / water 1.0)
+        // so the slider's neutral 1.0× reproduces the as-generated carve.
+        erosionScale: erosionStrength * (this._eroBaseScale || 1),
       });
       this.heightMap = height;
       this.flowMap = flow;
@@ -1678,7 +1699,21 @@ class Planet {
           put(L.veg, k, grade(vegCol, 2), vegA);
         } else {
           const c0 = this.colorPixelRocky(h, m, lat, cfg, pal, x, y, z, slope);
-          const c = [c0[0] * grainMul, c0[1] * grainMul, c0[2] * grainMul];
+          let c = [c0[0] * grainMul, c0[1] * grainMul, c0[2] * grainMul];
+          // volcanic lava / ice glacial rivers carved by the flow (matches the
+          // shader's uRiverStyle branches; water types handle rivers in L.water)
+          if (fm && aboveSea >= 0 && (this.type === 'volcanic' || this.type === 'ice')) {
+            const flow = sm(fm, uS, vS, 0);
+            const th = clamp(0.90 - 0.30 * riverStrength, 0.28, 0.92);
+            const rt = smoothstep(th, th + 0.16, flow) * (1 - smoothstep(0.10, 0.26, slope)) * smoothstep(sea, sea + 0.015, h);
+            const op = clamp(rt * clamp(0.55 + 0.35 * riverStrength, 0, 1), 0, 1);
+            if (op > 0.01) {
+              const rc = (this.type === 'volcanic')
+                ? mixRgb([191, 41, 8], [255, 158, 41], clamp(flow, 0, 1))
+                : mixRgb(pal.shore || [150, 180, 200], [204, 230, 255], clamp(flow, 0, 1));
+              c = mixRgb(c, rc, op);
+            }
+          }
           put(L.ground, k, grade(c, 1), landMask);
           put(L.veg, k, c, 0);
         }

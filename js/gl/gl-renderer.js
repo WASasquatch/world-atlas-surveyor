@@ -61,18 +61,41 @@ in vec2 vUv; out vec4 outColor;
 uniform sampler2D uScene;
 uniform sampler2D uBloom;
 uniform float uBloomStrength;
+uniform float uChroma;      // chromatic aberration (radial RGB split)
+uniform float uGrain;       // film grain amount
+uniform float uGrainTime;   // animated grain offset
 void main() {
-  vec4 s = texture(uScene, vUv);
-  vec3 bloom = texture(uBloom, vUv).rgb * uBloomStrength;
-  vec3 c = s.rgb + bloom;
+  vec2 uv = vUv;
+  vec2 fromC = uv - 0.5;
+  vec4 sRaw = texture(uScene, uv);
+  vec3 s;
+  if (uChroma > 0.0001) {
+    // lens chromatic aberration — split R/B radially, growing toward the limb
+    float amt = uChroma * 0.03 * dot(fromC, fromC);
+    s.r = texture(uScene, uv - fromC * amt).r;
+    s.g = sRaw.g;
+    s.b = texture(uScene, uv + fromC * amt).b;
+  } else { s = sRaw.rgb; }
+  vec3 bloom = texture(uBloom, uv).rgb * uBloomStrength;
+  vec3 c = s + bloom;
   // gentle filmic shoulder — keeps the retro palette, tames HDR glints
   c = c / (1.0 + max(c - 1.0, 0.0) * 0.55);
-  float a = clamp(s.a + dot(bloom, vec3(0.333)), 0.0, 1.0);
+  // animated film grain / dither — breaks up banding on smooth gradients
+  // (atmosphere haze, gas bands). Gated by coverage so empty space stays clean.
+  if (uGrain > 0.0001) {
+    float n = fract(sin(dot(uv * 1024.0 + uGrainTime, vec2(12.9898, 78.233))) * 43758.5453);
+    c += (n - 0.5) * uGrain * 0.10 * clamp(sRaw.a + dot(bloom, vec3(0.5)), 0.0, 1.0);
+  }
+  float a = clamp(sRaw.a + dot(bloom, vec3(0.333)), 0.0, 1.0);
   outColor = vec4(c, a);
 }
 `;
 
-function dataTexR(f32, w = TEX_W, h = TEX_H) {
+// Derive equirect dims (2:1) from a single-channel buffer length, so uploads
+// work at any generation resolution without threading w/h to every call site.
+function dimsR(len) { const h = Math.round(Math.sqrt(len / 2)); return [h * 2, h]; }
+function dataTexR(f32, w, h) {
+  if (w == null) { [w, h] = dimsR(f32.length); }
   const half = new Uint16Array(f32.length);
   for (let i = 0; i < f32.length; i++) half[i] = THREE.DataUtils.toHalfFloat(f32[i]);
   const t = new THREE.DataTexture(half, w, h, THREE.RedFormat, THREE.HalfFloatType);
@@ -83,7 +106,8 @@ function dataTexR(f32, w = TEX_W, h = TEX_H) {
   return t;
 }
 
-function dataTexRGB(u8rgb, w = TEX_W, h = TEX_H) {
+function dataTexRGB(u8rgb, w, h) {
+  if (w == null) { [w, h] = dimsR(u8rgb.length / 3); }
   const rgba = new Uint8Array(w * h * 4);
   for (let i = 0, j = 0; i < u8rgb.length; i += 3, j += 4) {
     rgba[j] = u8rgb[i]; rgba[j + 1] = u8rgb[i + 1]; rgba[j + 2] = u8rgb[i + 2]; rgba[j + 3] = 255;
@@ -175,6 +199,7 @@ class GLRenderer {
     const empty = this.emptyTex;
     this.u = {
       uResolution: { value: new THREE.Vector2(2, 2) },
+      uTexel: { value: new THREE.Vector2(1 / TEX_W, 1 / TEX_H) },
       uRadius: { value: 1 },
       uCenter: { value: new THREE.Vector2(1, 1) },
       uCosT: { value: 1 }, uSinT: { value: 0 },
@@ -225,6 +250,7 @@ class GLRenderer {
       uFlowTex: { value: empty },
       uHasRivers: { value: 0 },
       uRiverStrength: { value: 1 },
+      uRiverStyle: { value: 0 },   // 0 water, 1 lava (volcanic), 2 ice/glacial
       uSurfaceMode: { value: 0 },
       uGradientLut: { value: empty },
       uHasGradient: { value: 0 },
@@ -269,7 +295,10 @@ class GLRenderer {
     });
     this.compositeMat = mkMat(COMPOSITE_FRAG, {
       uScene: { value: null }, uBloom: { value: null }, uBloomStrength: { value: 0.55 },
+      uChroma: { value: 0 }, uGrain: { value: 0 }, uGrainTime: { value: 0 },
     });
+    // post-FX intensities (user-controlled). bloom is the strength multiplier.
+    this.postFX = { bloom: 0.55, chroma: 0.0, grain: 0.0 };
 
     this.quad = new THREE.Mesh(geo, this.planetMat);
     this.quad.frustumCulled = false;
@@ -374,6 +403,7 @@ class GLRenderer {
     const albSrc = (!isGasKind && planet.rawColorMap) ? planet.rawColorMap : planet.colorMap;
     u.uAlbedoTex.value = keep(dataTexRGB(albSrc));
     u.uHeightTex.value = keep(dataTexR(planet.heightMap));
+    u.uTexel.value.set(1 / planet.texW, 1 / planet.texH);
     u.uCloudTex.value = keep(dataTexR(planet.cloudMap));
     u.uIceTex.value = keep(dataTexR(planet.iceMap));
     u.uMoistTex.value = planet.moistureMap ? keep(dataTexR(planet.moistureMap)) : this.emptyTex;
@@ -381,6 +411,7 @@ class GLRenderer {
     u.uWaterTex.value = planet.waterMaskMap ? keep(dataTexR(planet.waterMaskMap)) : this.emptyTex;
     u.uFlowTex.value = planet.flowMap ? keep(dataTexR(planet.flowMap)) : this.emptyTex;
     u.uHasRivers.value = planet.flowMap ? 1 : 0;
+    u.uRiverStyle.value = planet.type === "volcanic" ? 1 : planet.type === "ice" ? 2 : 0;
     u.uHasAsh.value = planet.ashMap ? 1 : 0;
     // The CPU reference restricts water specular to terrestrial/ocean;
     // volcanic keeps the mask for its lava-glow path. Primordial and others
@@ -682,9 +713,14 @@ class GLRenderer {
     }
 
     this.quad.material = this.compositeMat;
-    this.compositeMat.uniforms.uScene.value = this.sceneRT.texture;
-    this.compositeMat.uniforms.uBloom.value = this.bloomEnabled ? this.bloomA.texture : this.emptyTex;
-    this.compositeMat.uniforms.uBloomStrength.value = this.bloomEnabled ? 0.55 : 0.0;
+    const cu = this.compositeMat.uniforms;
+    cu.uScene.value = this.sceneRT.texture;
+    cu.uBloom.value = this.bloomEnabled ? this.bloomA.texture : this.emptyTex;
+    cu.uBloomStrength.value = this.bloomEnabled ? this.postFX.bloom : 0.0;
+    cu.uChroma.value = this.postFX.chroma;
+    cu.uGrain.value = this.postFX.grain;
+    // advance grain unless capturing (frozen for seamless loop exports)
+    if (!this.capturing) cu.uGrainTime.value = (cu.uGrainTime.value + 1.0) % 1000.0;
     gl.setRenderTarget(null);
     gl.clear(true, false, false);
     gl.render(this.scene, this.cam);
@@ -787,6 +823,7 @@ class GLRenderer {
     const albSrc = (!isGasKind && planet.rawColorMap) ? planet.rawColorMap : planet.colorMap;
     u.uAlbedoTex.value = keep(dataTexRGB(albSrc));
     u.uHeightTex.value = keep(dataTexR(planet.heightMap));
+    u.uTexel.value.set(1 / planet.texW, 1 / planet.texH);
     u.uCloudTex.value = keep(dataTexR(planet.cloudMap));
     u.uIceTex.value = keep(dataTexR(planet.iceMap));
     u.uMoistTex.value = planet.moistureMap ? keep(dataTexR(planet.moistureMap)) : this.emptyTex;
@@ -794,6 +831,7 @@ class GLRenderer {
     u.uWaterTex.value = planet.waterMaskMap ? keep(dataTexR(planet.waterMaskMap)) : this.emptyTex;
     u.uFlowTex.value = planet.flowMap ? keep(dataTexR(planet.flowMap)) : this.emptyTex;
     u.uHasRivers.value = planet.flowMap ? 1 : 0;
+    u.uRiverStyle.value = planet.type === "volcanic" ? 1 : planet.type === "ice" ? 2 : 0;
     u.uShapeTex.value = planet.shapeMap ? keep(dataTexR(planet.shapeMap)) : this.emptyTex;
   }
 

@@ -10,10 +10,10 @@
 
 const TIERS = {
   //         resScale bloom  simW simH steps cloudOct cloudWarp evolveOct auroraDetail terrainOct floe droplets  exportFrames
-  low:    { name: 'Low',    resScale: 0.65, bloom: false, simW: 256, simH: 128, simSteps: 2, cloudOct: 2, cloudWarp: 1, evolveOct: 2, auroraDetail: 1, terrainOct: 2, floe: 0, droplets: 15000,  exportFrames: 60 },
-  medium: { name: 'Medium', resScale: 0.85, bloom: true,  simW: 512, simH: 256, simSteps: 3, cloudOct: 3, cloudWarp: 2, evolveOct: 3, auroraDetail: 1, terrainOct: 3, floe: 1, droplets: 40000,  exportFrames: 120 },
-  high:   { name: 'High',   resScale: 1.00, bloom: true,  simW: 640, simH: 320, simSteps: 4, cloudOct: 3, cloudWarp: 2, evolveOct: 4, auroraDetail: 2, terrainOct: 3, floe: 1, droplets: 80000,  exportFrames: 180 },
-  ultra:  { name: 'Ultra',  resScale: 1.00, bloom: true,  simW: 768, simH: 384, simSteps: 4, cloudOct: 4, cloudWarp: 2, evolveOct: 5, auroraDetail: 2, terrainOct: 3, floe: 1, droplets: 120000, exportFrames: 240 },
+  low:    { name: 'Low',    resScale: 0.65, bloom: false, simW: 384,  simH: 192, simSteps: 2, cloudOct: 2, cloudWarp: 1, evolveOct: 2, auroraDetail: 1, terrainOct: 2, floe: 0, droplets: 15000,  exportFrames: 60 },
+  medium: { name: 'Medium', resScale: 0.85, bloom: true,  simW: 768,  simH: 384, simSteps: 3, cloudOct: 3, cloudWarp: 2, evolveOct: 3, auroraDetail: 1, terrainOct: 3, floe: 1, droplets: 40000,  exportFrames: 120 },
+  high:   { name: 'High',   resScale: 1.00, bloom: true,  simW: 1280, simH: 640, simSteps: 5, cloudOct: 3, cloudWarp: 2, evolveOct: 4, auroraDetail: 2, terrainOct: 3, floe: 1, droplets: 80000,  exportFrames: 180 },
+  ultra:  { name: 'Ultra',  resScale: 1.00, bloom: true,  simW: 2048, simH: 1024, simSteps: 5, cloudOct: 4, cloudWarp: 2, evolveOct: 5, auroraDetail: 2, terrainOct: 3, floe: 1, droplets: 120000, exportFrames: 240 },
 };
 const ORDER = ['low', 'medium', 'high', 'ultra'];
 

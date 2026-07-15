@@ -29,6 +29,7 @@ out vec4 outColor;
 
 // --- frame / geometry ---
 uniform vec2  uResolution;     // internal render resolution
+uniform vec2  uTexel;          // 1/mapW, 1/mapH (baked-map texel size)
 uniform float uRadius;         // planet radius in internal pixels
 uniform vec2  uCenter;         // planet center in internal pixels (y-down)
 uniform float uCosT, uSinT;    // spin
@@ -72,6 +73,7 @@ uniform sampler2D uShapeTex;
 uniform sampler2D uMoistTex;
 uniform sampler2D uFlowTex;    // erosion flow / river map
 uniform float uHasRivers;
+uniform float uRiverStyle;     // 0 = water, 1 = lava (volcanic), 2 = ice/glacial
 uniform float uSurfaceMode;    // 1 = render flat equirect surface (for export card)
 uniform float uRiverStrength;  // RIVERS slider (0 = none .. 2 = prominent)
 uniform sampler2D uGradientLut; // 256x1 colour-grade ramp (gradient map)
@@ -420,11 +422,13 @@ vec3 classifyRocky(float h, float m, float lat, vec3 w, float slope, out float i
 // self-shadow (Beer), a powder dark-edge term, and forward scatter (silver lining).
 // ============================================================================
 
-// latitude weather bands: +ITCZ (equator) −subtropical highs (~25°) +storm belt (~55°)
+// latitude weather bands: +ITCZ (equator) −subtropical highs (~25°) +storm belt
+// (~55°). Kept GENTLE — a subtle bias toward Earth-like cloudy/clear latitudes,
+// not hard rings (the coverage noise + curl flow dominate the distribution).
 float cloudLatBias(float aLat) {
-  return 0.34 * exp(-aLat * aLat / 0.010)
-       - 0.30 * exp(-(aLat - 0.27) * (aLat - 0.27) / 0.012)
-       + 0.24 * exp(-(aLat - 0.58) * (aLat - 0.58) / 0.050);
+  return 0.18 * exp(-aLat * aLat / 0.012)
+       - 0.16 * exp(-(aLat - 0.27) * (aLat - 0.27) / 0.014)
+       + 0.13 * exp(-(aLat - 0.58) * (aLat - 0.58) / 0.060);
 }
 
 // polar-tapered flow advection. 'bands' sets the zonal-jet count and 'phase'
@@ -437,7 +441,11 @@ vec3 cloudWarp(vec3 dir, float strength, float bands, float phase, float scale) 
     int steps = max(3, uQCloudWarp * 2);
     for (int i = 0; i < 8; i++) {
       if (i >= steps) break;
-      vec3 f = sphereFlow(dir, scale, uFlowTime + phase, uQCloudOct, 0.5, 1.0, bands, 1.7, 0.55, 1.0);
+      // curl-dominant, weak zonal banding: terrestrial weather swirls into
+      // frontal systems / storms, it does NOT stripe into gas-giant jets. (Gas
+      // giants get their strong bands from the separate flow sim.) curlAmp 1.5,
+      // bandAmp 0.55 — was 1.0 / 1.7, which read as rigid horizontal banding.
+      vec3 f = sphereFlow(dir, scale, uFlowTime + phase, uQCloudOct, 0.5, 1.5, bands, 0.55, 0.55, 1.0);
       dir = normalize(dir - f * perStep);
     }
   }
@@ -531,7 +539,7 @@ void main() {
     // and river slope — one set of neighbour fetches instead of three).
     float dxT = 0.0, dyT = 0.0, slopeSnow = 0.0;
     if (uKindGas < 0.5) {
-      vec2 tx = vec2(1.0 / 768.0, 1.0 / 384.0);
+      vec2 tx = uTexel;
       float hpx = heightAt(vec2(fract(uv.x + tx.x), uv.y));
       float hmx = heightAt(vec2(fract(uv.x - tx.x), uv.y));
       float hpy = heightAt(vec2(uv.x, clamp(uv.y + tx.y, 0.0, 1.0)));
@@ -554,20 +562,26 @@ void main() {
       factor = 1.0 + (factor - 1.0) * (1.0 - iceCover);
       albedo *= factor;
     }
-    // rivers (same rule as the live view: steep-pinch + fade into ice/snow)
+    // rivers (same rule as the live view: steep-pinch + style by world type).
+    // Flat map — lava reads as a bright hot channel colour (no lighting here).
     if (uHasRivers > 0.5 && uRiverStrength > 0.01 && uKindGas < 0.5 && h >= uSeaLevel) {
       float flow = texture(uFlowTex, uv).r;
       float slope = length(vec2(dxT, dyT));
       float th = clamp(0.90 - 0.30 * uRiverStrength, 0.28, 0.92);
       float riverT = smoothstep(th, th + 0.16, flow) * (1.0 - smoothstep(0.10, 0.26, slope));
       riverT *= smoothstep(uSeaLevel, uSeaLevel + 0.015, h);
-      float absLatR = abs(lat) * 0.63661977;
-      float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
-      float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
-      riverT *= (1.0 - coldFade);
+      if (uRiverStyle < 0.5) {
+        float absLatR = abs(lat) * 0.63661977;
+        float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
+        float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
+        riverT *= (1.0 - coldFade);
+      }
       if (riverT > 0.001) {
-        vec3 rc = mix(uPalShore, uPalWater, clamp(flow, 0.0, 1.0));
-        albedo = mix(albedo, rc, riverT * clamp(0.55 + 0.35 * uRiverStrength, 0.0, 1.0));
+        float op = riverT * clamp(0.55 + 0.35 * uRiverStrength, 0.0, 1.0);
+        vec3 rc = (uRiverStyle > 1.5) ? mix(uPalShore, vec3(0.80, 0.90, 1.0), clamp(flow, 0.0, 1.0))
+                : (uRiverStyle > 0.5) ? mix(vec3(0.75, 0.16, 0.03), vec3(1.0, 0.62, 0.16), clamp(flow, 0.0, 1.0))
+                                      : mix(uPalShore, uPalWater, clamp(flow, 0.0, 1.0));
+        albedo = mix(albedo, rc, op);
       }
     }
     outColor = vec4(clamp(albedo, 0.0, 1.0), 1.0);
@@ -638,7 +652,7 @@ void main() {
   // (previously each of the three re-fetched the same four texels).
   float dxT = 0.0, dyT = 0.0, slopeSnow = 0.0;
   if (uKindGas < 0.5) {
-    vec2 texel = vec2(1.0 / 768.0, 1.0 / 384.0);
+    vec2 texel = uTexel;
     float hpx = heightAt(vec2(fract(uv.x + texel.x), uv.y));
     float hmx = heightAt(vec2(fract(uv.x - texel.x), uv.y));
     float hpy = heightAt(vec2(uv.x, clamp(uv.y + texel.y, 0.0, 1.0)));
@@ -703,30 +717,38 @@ void main() {
   // riverCoverage is exported to the water-specular block so rivers/lakes catch
   // the sun's Fresnel glint exactly like the oceans do (no dead matte water).
   float riverCoverage = 0.0;
+  float lavaRiverT = 0.0;   // volcanic: emissive lava channels added after lighting
   if (uHasRivers > 0.5 && uRiverStrength > 0.01 && uKindGas < 0.5 && h >= uSeaLevel) {
     float flow = texture(uFlowTex, uv).r;
     float slope = length(vec2(dxT, dyT));   // shared central difference (above)
     // RIVERS slider lowers the discharge threshold (more tributaries appear)
-    // and raises opacity; rivers sit in valleys and fade into the sea at the
-    // coast so they blend seamlessly
+    // and raises opacity; channels sit in valleys and pinch out on steep ground.
     float th = clamp(0.90 - 0.30 * uRiverStrength, 0.28, 0.92);
-    // pinch out on steep ground (waterfalls/gorges, not open channels)
     float riverT = smoothstep(th, th + 0.16, flow) * (1.0 - smoothstep(0.10, 0.26, slope));
     riverT *= smoothstep(uSeaLevel, uSeaLevel + 0.015, h);
-    // fade into ice/snow: full polar ice (iceCover) AND cold snowy uplands
-    // (climate = latitude + altitude approaching the ice line), so rivers
-    // vanish into the frozen interiors instead of drawing over the snow
-    float absLatR = abs(lat) * 0.63661977;   // /(PI/2)
-    float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
-    float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
-    riverT *= (1.0 - coldFade);
+    // WATER rivers fade into ice/snow; LAVA (hot) and GLACIAL (already frozen)
+    // channels do not vanish into cold.
+    if (uRiverStyle < 0.5) {
+      float absLatR = abs(lat) * 0.63661977;   // /(PI/2)
+      float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
+      float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
+      riverT *= (1.0 - coldFade);
+    }
     if (riverT > 0.001) {
-      vec3 riverCol = mix(uPalShore, uPalWater, clamp(flow, 0.0, 1.0));
-      albedo = mix(albedo, riverCol, riverT * clamp(0.55 + 0.35 * uRiverStrength, 0.0, 1.0));
-      // how "wet" the surface reads here — drives specular below (deeper/wider
-      // channels reflect more). Opacity-matched to the tint so a faint river
-      // gets a faint glint.
-      riverCoverage = riverT * clamp(0.55 + 0.35 * uRiverStrength, 0.0, 1.0);
+      float op = riverT * clamp(0.55 + 0.35 * uRiverStrength, 0.0, 1.0);
+      if (uRiverStyle > 1.5) {
+        // ICE — glacial meltwater channels: pale blue, matte
+        albedo = mix(albedo, mix(uPalShore, vec3(0.80, 0.90, 1.0), clamp(flow, 0.0, 1.0)), op);
+      } else if (uRiverStyle > 0.5) {
+        // LAVA — cool basalt crust in the channel here; the hot emissive glow is
+        // added post-lighting (below) so it blooms and lights the night side.
+        albedo = mix(albedo, vec3(0.12, 0.05, 0.03), op * 0.7);
+        lavaRiverT = op;
+      } else {
+        // WATER — deeper/wider channels reflect more (drives specular below)
+        albedo = mix(albedo, mix(uPalShore, uPalWater, clamp(flow, 0.0, 1.0)), op);
+        riverCoverage = op;
+      }
     }
   }
 
@@ -853,6 +875,16 @@ void main() {
       float glow = (1.0 - 0.5 * light) * mask;
       c += vec3(0.784, 0.235, 0.039) * glow * 1.5; // 1.5 = deliberate HDR boost so lava blooms
     }
+  }
+  // lava RIVERS — emissive glowing channels the erosion flow carved into the
+  // volcanic uplands. HDR-boosted so they bloom and light the night side, with
+  // a hotter core (brighter where the discharge is strongest).
+  if (lavaRiverT > 0.001) {
+    // fade out right at the lava-sea shoreline so the river glow doesn't stack
+    // with the lava-seas emissive into an over-bright seam at the coast
+    float shoreFade = smoothstep(uSeaLevel + 0.006, uSeaLevel + 0.05, h);
+    vec3 lavaHot = mix(vec3(0.85, 0.22, 0.03), vec3(1.0, 0.66, 0.18), clamp(lavaRiverT, 0.0, 1.0));
+    c += lavaHot * lavaRiverT * shoreFade * (1.0 - 0.4 * light) * 1.7;
   }
 
   // ---- auroras — strength slider + flow-driven organic morph ----

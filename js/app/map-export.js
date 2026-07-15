@@ -83,7 +83,24 @@ export function exportMapLayers(renderer, opts = {}) {
     gradient,
   };
 
-  const L = planet.bakeExportLayers(bakeOpts);
+  // Gas kinds: the CPU colorMap is only the STATIC banded albedo — the live view
+  // is the gaseous-giganticus flow sim advecting an equirect dye texture. Pull
+  // the GG-flowed, seamless equirect surface straight from the shader
+  // (readSurfaceEquirect samples uGasTex + the gradient) so the export matches
+  // the animated planet instead of exporting flat, un-flowed bands.
+  const cfg = (planet.getTypeConfig && planet.getTypeConfig()) || planet._cfg || {};
+  const isGas = cfg.kind === 'gas';
+  let L;
+  if (isGas && renderer && renderer.gasSim && typeof renderer.readSurfaceEquirect === 'function') {
+    const surf = renderer.readSurfaceEquirect(BW, BH);
+    const N = BW * BH;
+    const rgb = new Uint8ClampedArray(N * 3), alpha = new Float32Array(N);
+    for (let k = 0; k < N; k++) { const s = k * 4, o = k * 3; rgb[o] = surf.data[s]; rgb[o + 1] = surf.data[s + 1]; rgb[o + 2] = surf.data[s + 2]; alpha[k] = 1; }
+    const empty = () => ({ rgb: new Uint8ClampedArray(N * 3), alpha: new Float32Array(N) });
+    L = { ground: { rgb, alpha }, veg: empty(), snow: empty(), water: empty(), clouds: empty() };
+  } else {
+    L = planet.bakeExportLayers(bakeOpts);
+  }
   const out = new Uint8ClampedArray(width * height * 4);
   const cnt = ss * ss;
 

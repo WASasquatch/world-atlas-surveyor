@@ -147,6 +147,9 @@ The `EXPORT WORLD` button produces a 2048×4096 PNG survey card laid out as a mu
 | Mode | Enhanced (WebGL2, default) or Classic (original CPU rasterizer). |
 | Pixel scale | 1×–6× downsampling for the chunky pixel-art look. |
 | AA | Anti-aliasing — OFF / 2× / 4× supersample (renders above the display resolution and downsamples for smooth edges). Applies to the live view; the map and animation exports supersample automatically. |
+| Map res | Generation resolution for every baked map (terrain / erosion / colour / clouds), 768–2048. Higher = crisper terrain, coasts, rivers and sharper exports, at a heavier bake. Re-generates on change. Same seed at the same resolution is bit-identical. |
+| Preview | Fast-iteration toggle: bakes at 768, forces the Low quality tier + chunky 3× pixels + no AA. Turn off for a full-resolution, full-quality render to view/export. |
+| Post FX (GL) | **Bloom** strength, **Chroma** (chromatic aberration — radial RGB lens split, strongest at the limb), and **Grain** (animated film grain / dither that breaks up banding on smooth gradients). |
 | Terraform | Live sea level / vegetation / ice / clouds / atmosphere height + density / evolution / cloud flow (Enhanced mode). Atmosphere **A.HEIGHT** sets how far the haze/halo extends; **A.DENSITY** sets its opacity (a thin dense shell vs a tall faint one, independently). Clouds are advected along the atmospheric flow so cloud shapes stream with the currents. |
 | Displacement | Surface relief intensity for rocky bodies. |
 | Generate | Re-rolls with a new random designation, or refreshes the current seed. |
