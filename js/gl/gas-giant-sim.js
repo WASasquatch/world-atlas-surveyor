@@ -56,6 +56,7 @@ uniform float uNumBands;
 uniform float uBandAmp;
 uniform float uPoleAtt;
 uniform float uBandPower;
+uniform float uTurb;        // TURBULENCE: secondary high-freq curl (KH billows)
 ${SIMPLEX_3D}
 ${SIMPLEX_4D}
 ${FBM_4D}
@@ -65,6 +66,14 @@ void main() {
   vec3 dir = uvToDir(vUv);
   vec3 vel = sphereFlow(dir, uNoiseScale, uW, 3, 0.5,
                         uCurlAmp, uNumBands, uBandAmp, uPoleAtt, uBandPower);
+  // Secondary, finer, low-amplitude curl layered on top. This adds the
+  // transverse wiggle at the zonal shear lines that rolls up into
+  // Kelvin-Helmholtz billows (the fine curls GG shows at band boundaries),
+  // which a single smooth curl can't seed. uTurb 0 = none (pure bands+curl).
+  if (uTurb > 0.001) {
+    vel += curlOnSphere(dir, uNoiseScale * 3.3, uW * 1.7 + 11.0, 2, 0.5)
+         * (uCurlAmp * 0.5 * uTurb);
+  }
   outColor = vec4(vel, 1.0);
 }
 `;
@@ -80,6 +89,7 @@ uniform float uBandCount;
 uniform float uJitter;
 uniform float uSeedOffset;
 uniform float uStripeFreq;
+uniform float uDetail;      // DETAIL: init contrast/roughness the flow shears
 ${SIMPLEX_3D}
 ${SIMPLEX_4D}
 ${FBM_4D}
@@ -94,11 +104,19 @@ void main() {
   float m = mod(fi, per);
   int i0 = int(floor(m));
   int i1 = int(mod(floor(m) + 1.0, per));
-  // narrow smoothing between bands keeps distinct stripes
-  float f = smoothstep(0.38, 0.62, fract(m));
+  // band edge sharpens with DETAIL — crisper stripes give the shear more
+  // contrast to fold into filaments instead of a smooth gradient to smear
+  float e = 0.12 - 0.09 * uDetail;                  // 0.12 (soft) .. 0.03 (crisp)
+  float f = smoothstep(0.5 - e, 0.5 + e, fract(m));
   vec3 col = mix(uBandColors[i0], uBandColors[i1], f);
-  // fine grain so advection has structure to shear into filaments
-  col *= 1.0 + 0.10 * snoise3(dir * 24.0 + uSeedOffset);
+  // multi-octave detail — because ADVECT re-seeds toward uInitDye every step,
+  // whatever structure lives here is continuously refreshed and sheared into
+  // persistent filaments rather than diffusing away.
+  float d = fbm4(vec4(dir * (18.0 + 40.0 * uDetail), uSeedOffset), 3, 0.6);
+  col *= 1.0 + (0.08 + 0.22 * uDetail) * d;
+  // anisotropic streaks (fine in longitude, broad in latitude) that the zonal
+  // shear stretches lengthwise into GG-style banded filaments
+  col *= 1.0 + 0.12 * uDetail * snoise3(dir * vec3(64.0, 7.0, 64.0) + uSeedOffset);
   outColor = vec4(col, 1.0);
 }
 `;
@@ -224,6 +242,15 @@ class GasGiantSim {
       this.params.inject = 0.012;                          // keep hot rifts crisp
     }
     this.baseNumBands = this.params.numBands;   // AFTER the tweak
+    // Base values captured AFTER all seed-derived rng() draws so the live
+    // SCALE / TURBULENCE / DETAIL sliders are pure multipliers over the seed
+    // baseline (no new rng() here → the per-seed flow character is unchanged;
+    // these are appearance controls, fixed constants at their neutral point).
+    this.baseNoiseScale = this.params.noiseScale;
+    this.baseSharpenAmount = this.params.sharpenAmount;
+    this.detail = 0.5;    // DETAIL neutral — init roughness/contrast + sharpen
+    this.turb = 0.35;     // TURBULENCE neutral — secondary KH-billow curl fraction
+    this.params.sharpenAmount = Math.min(0.32, this.baseSharpenAmount * (0.7 + 0.6 * this.detail));
     this.stripeFreq = 1.0;
     this.vortexStrength = 1.0;
     this._injectBoost = 0;
@@ -259,7 +286,10 @@ class GasGiantSim {
       const s = pal.storm;
       colors[slot] = new THREE.Vector3(s[0] / 255, s[1] / 255, s[2] / 255);
     }
-    this.bandColors = colors;
+    this._paletteBandColors = colors;   // seed-derived strip (restore target)
+    // a custom-colour override (vec3[8]) supplied by the appearance panel takes
+    // precedence over the seed strip and survives quality/regen rebuilds
+    this.bandColors = (opts.bandColors && opts.bandColors.length === 8) ? opts.bandColors : colors;
     this.bandCount = 8;
     this.jitter = 0.02 + rng() * 0.05;
     this.seedOffset = rng() * 100;
@@ -301,6 +331,7 @@ class GasGiantSim {
       uBandAmp: { value: this.params.bandAmp },
       uPoleAtt: { value: this.params.poleAtt },
       uBandPower: { value: this.params.bandPower },
+      uTurb: { value: this.turb },
     });
     this.initMat = mkMat(INIT_DYE_FRAG, {
       uBandColors: { value: this.bandColors },
@@ -308,6 +339,7 @@ class GasGiantSim {
       uJitter: { value: this.jitter },
       uSeedOffset: { value: this.seedOffset },
       uStripeFreq: { value: 1.0 },
+      uDetail: { value: this.detail },
     });
     this.advectMat = mkMat(ADVECT_FRAG, {
       uDye: { value: null },
@@ -352,6 +384,51 @@ class GasGiantSim {
   }
 
   setVortex(s) { this.vortexStrength = s; }        // s in 0.1..10
+
+  // SCALE — swirl/feature size. Multiplier over the seed noiseScale (higher =
+  // finer, more intricate flow). Re-renders only the cheap velocity pass.
+  setScale(mult) {
+    const v = this.baseNoiseScale * mult;
+    if (v !== this.params.noiseScale) {
+      this.params.noiseScale = v;
+      this.velMat.uniforms.uNoiseScale.value = v;
+      this.renderVelocity();
+    }
+  }
+
+  // TURBULENCE — secondary high-freq curl fraction (Kelvin-Helmholtz billows /
+  // chaotic mixing at band boundaries). Velocity pass only.
+  setTurbulence(t) {
+    if (t !== this.turb) {
+      this.turb = t;
+      this.velMat.uniforms.uTurb.value = t;
+      this.renderVelocity();
+    }
+  }
+
+  // DETAIL — initial-dye roughness/contrast + edge crispness + sharpen strength
+  // (filament fineness). Re-renders the init pass and boosts injection so the
+  // richer detail migrates into the live dye over ~1.5s with no black frame.
+  setDetail(d) {
+    if (d === this.detail) return;
+    this.detail = d;
+    this.initMat.uniforms.uDetail.value = d;
+    this.params.sharpenAmount = Math.min(0.32, this.baseSharpenAmount * (0.7 + 0.6 * d));
+    this.sharpenMat.uniforms.uAmount.value = this.params.sharpenAmount;
+    this.renderPass(this.initMat, this.initRT);
+    this._injectBoost = 90;
+  }
+
+  // Recolour the gas bands/clouds live (custom-colour override). cols =
+  // THREE.Vector3[8] (0..1) or null to restore the seed-derived strip. Re-seeds
+  // the init dye and lets the new colours migrate into the live flow over ~1.5s
+  // (same no-black-frame mechanism as setDensity / setDetail).
+  setBandColors(cols) {
+    this.bandColors = (cols && cols.length === 8) ? cols : this._paletteBandColors;
+    this.initMat.uniforms.uBandColors.value = this.bandColors;
+    this.renderPass(this.initMat, this.initRT);
+    this._injectBoost = 90;
+  }
 
   // ITERATIONS — develop the flow to exactly n advection steps from the seed.
   // More iterations = more sheared, filamentary detail (like GG's -i count).

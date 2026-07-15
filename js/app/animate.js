@@ -18,8 +18,18 @@ import { encodeAPNG, encodeGIF, muxAnimatedWebP } from './anim-encoders.js';
 async function captureAnimation(renderer, opts) {
   const { frames, format, alpha, delayMs = 40, onProgress } = opts;
   const OUT = opts.size || 384;
+  // Supersample: render each frame at SS× the output size, then box-downscale
+  // with smoothing so the exported animation is anti-aliased (no jagged limb /
+  // pixelated coastlines). Cap the render at ~1600px so weak GPUs don't stall.
+  const ss = Math.max(1, Math.min(opts.ssaa || 2, Math.floor(1600 / OUT) || 1));
   const glCanvas = renderer.canvas;
   const starsCanvas = renderer.starsCanvas;
+
+  // Render the square frame at the supersampled resolution for the capture,
+  // restoring the interactive viewport afterwards.
+  const savedViewW = renderer.viewW, savedViewH = renderer.viewH, savedPS = renderer.pixelScale, savedAA = renderer.aa;
+  const capPx = OUT * ss;
+  renderer.resize(capPx, capPx, 1, 1);   // capture does its own SSAA — don't also apply the viewport AA
 
   const off = document.createElement('canvas');
   off.width = OUT; off.height = OUT;
@@ -59,7 +69,9 @@ async function captureAnimation(renderer, opts) {
       octx.imageSmoothingEnabled = true;              // stars scale smoothly
       octx.drawImage(starsCanvas, sx, sy, sSize, sSize, 0, 0, OUT, OUT);
     }
-    octx.imageSmoothingEnabled = false;               // planet keeps crisp pixels
+    // supersampled planet → smooth box-downscale to OUT for anti-aliasing
+    octx.imageSmoothingEnabled = true;
+    octx.imageSmoothingQuality = 'high';
     octx.drawImage(glCanvas, gx, gy, gSize, gSize, 0, 0, OUT, OUT);
 
     if (useWebp) {
@@ -74,6 +86,7 @@ async function captureAnimation(renderer, opts) {
   }
 
   renderer.endCapture();
+  renderer.resize(savedViewW, savedViewH, savedPS, savedAA);   // restore interactive viewport (+ AA)
 
   const encOpts = { width: OUT, height: OUT, delayMs, loop: 0, transparent: alpha };
   if (useWebp) {

@@ -131,8 +131,10 @@ class GLRenderer {
     // terraform state (uniform mirror; null field = use baked default)
     this.terraform = {
       enabled: false, seaLevel: 0, iceLine: 0.65, vegetation: 1,
-      cloudMul: 1, evolveAmp: 0, evolve: 0, atmScale: 1,
-      flowMul: 1, churn: 1, procClouds: 0, emission: 1, aurora: 1, snowOffset: 0, gasDensity: 1, riverStrength: 1,
+      cloudMul: 1, cloudCover: 0.5, cloudFlow: 1.0, evolveAmp: 0, evolve: 0, atmScale: 1,
+      cloudAltLow: 0.03, cloudAltMid: 0.06, cloudAltHigh: 0.10, cloudAmtLow: 1.0, cloudAmtMid: 0.7, cloudAmtHigh: 0.5,
+      cloudScatter: 0.6, cloudSeed: 0, atmDensity: 1,
+      flowMul: 1, churn: 1, emission: 1, aurora: 1, snowOffset: 0, gasDensity: 1, riverStrength: 1,
     };
     this.flowChurn = 1;
     this.capturing = false;
@@ -183,6 +185,7 @@ class GLRenderer {
       uSunColor: { value: new THREE.Vector3(1, 1, 1) },
       uSunFalloff: { value: 1 },
       uAtmThickness: { value: 0 },
+      uAtmDensity: { value: 1 },
       uAtmColor: { value: new THREE.Vector3(0.47, 0.7, 0.86) },
       uKindGas: { value: 0 },
       uSelfEmit: { value: 0 },
@@ -213,7 +216,6 @@ class GLRenderer {
       uUseGasTex: { value: 0 },
       uVortexStrength: { value: 1 },
       uFlowTime: { value: 0 },
-      uProcClouds: { value: 0 },
       uCloudSeed: { value: 0 },
       uEmission: { value: 1 },
       uGlowCol: { value: new THREE.Vector3(1, 0.5, 0.22) },
@@ -223,10 +225,25 @@ class GLRenderer {
       uFlowTex: { value: empty },
       uHasRivers: { value: 0 },
       uRiverStrength: { value: 1 },
+      uSurfaceMode: { value: 0 },
+      uGradientLut: { value: empty },
+      uHasGradient: { value: 0 },
+      uGradientMix: { value: 1 },
+      uGradientScale: { value: 1 },
+      // per surface-class gradient targeting (0 water,1 rock,2 veg,3 ice,4 gas)
+      uGradEnable: { value: [1, 1, 1, 1, 1] },
+      uGradLo: { value: [0, 0, 0, 0, 0] },
+      uGradHi: { value: [1, 1, 1, 1, 1] },
       uTerraform: { value: 0 },
       uIceLine: { value: 0.65 },
       uVegetation: { value: 1 },
       uCloudMul: { value: 1 },
+      uCloudCover: { value: 0.5 },   // COVERAGE (area), 0.5 = baseline
+      uCloudFlow: { value: 1.0 },    // subtle GG-flow warp on clouds by default
+      // multi-deck clouds: LOW cumulus / MID banks / HIGH cirrus
+      uCloudAltLow: { value: 0.03 }, uCloudAltMid: { value: 0.06 }, uCloudAltHigh: { value: 0.10 },
+      uCloudAmtLow: { value: 1.0 }, uCloudAmtMid: { value: 0.7 }, uCloudAmtHigh: { value: 0.5 },
+      uCloudScatter: { value: 0.6 },
       uEvolve: { value: 0 },
       uEvolveAmp: { value: 0 },
       uQCloudOct: { value: 3 },
@@ -275,13 +292,15 @@ class GLRenderer {
     this.uploadPlanet(planet);
   }
 
-  resize(viewW, viewH, pixelScale) {
+  resize(viewW, viewH, pixelScale, aa) {
     this.viewW = Math.max(100, Math.floor(viewW));
     this.viewH = Math.max(100, Math.floor(viewH));
     this.pixelScale = pixelScale;
+    if (aa != null) this.aa = aa;
+    const ss = this.aa || 1;   // supersample factor (anti-aliasing)
     const q = Quality.get();
-    this.internalW = Math.max(50, Math.floor(this.viewW / pixelScale * q.resScale));
-    this.internalH = Math.max(50, Math.floor(this.viewH / pixelScale * q.resScale));
+    this.internalW = Math.max(50, Math.floor(this.viewW / pixelScale * q.resScale * ss));
+    this.internalH = Math.max(50, Math.floor(this.viewH / pixelScale * q.resScale * ss));
     this.bloomEnabled = q.bloom;
 
     this.gl.setPixelRatio(1);
@@ -325,9 +344,13 @@ class GLRenderer {
     if (this._isGasKind && this.planet) {
       const q = Quality.get();
       if (this.gasSim) this.gasSim.dispose();
-      this.gasSim = new GasGiantSim(this.gl, this.planet, { simW: q.simW, simH: q.simH });
-      this.gasSim.setVortex(this.terraform.flowMul ?? 1);      // preserve live flow state
+      this.gasSim = new GasGiantSim(this.gl, this.planet, { simW: q.simW, simH: q.simH, bandColors: this._gasBandVecs() });
+      // preserve all live flow state across the tier rebuild
+      this.gasSim.setVortex(this.terraform.flowMul ?? 1);
       this.gasSim.setDensity(this.terraform.gasDensity ?? 1);
+      if (this.terraform.gasScale != null) this.gasSim.setScale(this.terraform.gasScale);
+      if (this.terraform.gasTurb != null) this.gasSim.setTurbulence(this.terraform.gasTurb);
+      if (this.terraform.gasDetail != null) this.gasSim.setDetail(this.terraform.gasDetail);
       this.u.uGasTex.value = this.gasSim.texture;
       this.u.uUseGasTex.value = 1;
     }
@@ -381,7 +404,10 @@ class GLRenderer {
     u.uHasClouds.value = (!isGasKind && pal.cloudCol) ? 1 : 0;
     u.uGlowCol.value = v3(pal.glow, [255, 128, 56]);
     u.uGlowHot.value = v3(pal.glowHot, [255, 208, 120]);
-    u.uCloudSeed.value = ((planet.seedNum >>> 0) % 997) * 0.0137;
+    // base cloud seed is unique per world; the CLOUD SEED slider adds an offset
+    // so the pattern can be re-rolled without regenerating the planet.
+    this._cloudSeedBase = ((planet.seedNum >>> 0) % 997) * 0.0137;
+    u.uCloudSeed.value = this._cloudSeedBase;
 
     const atmLevels = { none: 0, thin: 0.08, thick: 0.20, dense: 0.36 };
     this.baseAtmThickness = atmLevels[planet.atmosphere] || 0;
@@ -405,6 +431,9 @@ class GLRenderer {
     u.uPalMountain.value = v3(pal.mountain, [130, 120, 110]);
     u.uPalPeak.value = v3(pal.peak, [220, 220, 220]);
     u.uPalPolarIce.value = v3(pal.polarIce, [235, 245, 250]);
+    // re-apply any live custom-colour override on top of the fresh seed palette
+    // (gradient uniforms persist on their own — never reset here)
+    if (this._palOverride) this._applyPaletteOverride();
 
     // reset terraform to this planet's baked defaults
     this.terraform.enabled = false;
@@ -412,11 +441,15 @@ class GLRenderer {
     this.terraform.iceLine = (cfg.iceLine != null && cfg.iceLine > -1 && cfg.iceLine < 2) ? cfg.iceLine : 0.65;
     this.terraform.vegetation = 1;
     this.terraform.cloudMul = 1;
+    this.terraform.cloudCover = 0.5;   // neutral cloud coverage
+    this.terraform.cloudFlow = 1.0;    // subtle GG global-current warp
     this.terraform.evolveAmp = 0;
     this.terraform.atmScale = 1;
     this.terraform.flowMul = 1;
     this.terraform.churn = 1;
-    this.terraform.procClouds = 0;
+    this.terraform.gasScale = 1;     // neutral flow-shape defaults (GG controls)
+    this.terraform.gasTurb = 0.35;
+    this.terraform.gasDetail = 0.5;
     this.terraform.emission = 1;
     this.terraform.aurora = 1;
     this.terraform.snowOffset = 0;
@@ -429,7 +462,7 @@ class GLRenderer {
     // the quality tier.
     if (isGasKind) {
       const q = Quality.get();
-      this.gasSim = new GasGiantSim(this.gl, planet, { simW: q.simW, simH: q.simH });
+      this.gasSim = new GasGiantSim(this.gl, planet, { simW: q.simW, simH: q.simH, bandColors: this._gasBandVecs() });
       u.uGasTex.value = this.gasSim.texture;
       u.uUseGasTex.value = 1;
     } else {
@@ -441,6 +474,99 @@ class GLRenderer {
   /** True when the current planet supports live re-classification. */
   get terraformable() {
     return !!this.planet && (this.planet.type === 'terrestrial' || this.planet.type === 'ocean');
+  }
+
+  // ---------- live appearance overrides (gradient map + custom colours) ----------
+  // Gradient map — a 256x1 LUT the shader remaps albedo through by luminance.
+  // Pure render-time uniforms; never touches the seed-deterministic bake.
+  setGradient(tex, mix, scale, lut) {
+    // dispose the previous LUT so repeated uploads don't leak a GPU texture
+    if (this._grad && this._grad.tex && this._grad.tex !== tex) this._grad.tex.dispose();
+    const s = (scale != null) ? scale : (this._grad ? this._grad.scale : 1);
+    // `lut` is the CPU-side Uint8 ramp (256*3) so the layered map export can
+    // reproduce the gradient off-GPU; keep the prior one if not re-supplied.
+    const cpuLut = (lut !== undefined) ? lut : (this._grad ? this._grad.lut : null);
+    this._grad = { tex, mix, scale: s, lut: cpuLut };
+    this.u.uGradientLut.value = tex;
+    this.u.uHasGradient.value = 1;
+    this.u.uGradientMix.value = mix;
+    this.u.uGradientScale.value = s;
+  }
+  setGradientMix(mix) { if (this._grad) { this._grad.mix = mix; this.u.uGradientMix.value = mix; } }
+  setGradientScale(scale) { this.u.uGradientScale.value = scale; if (this._grad) this._grad.scale = scale; }
+  // Per-class gradient targeting. `targets` = { enable:[5], lo:[5], hi:[5] }
+  // (index 0 water,1 rock,2 veg,3 ice,4 gas). Live uniforms; no rebake.
+  setGradientTargets(targets) {
+    if (!targets) return;
+    if (targets.enable) this.u.uGradEnable.value = targets.enable.slice();
+    if (targets.lo) this.u.uGradLo.value = targets.lo.slice();
+    if (targets.hi) this.u.uGradHi.value = targets.hi.slice();
+  }
+
+  // Gas cloud/band recolour — strip8 is an array of 8 [r,g,b] (0-255) or null to
+  // restore the seed bands. Persisted (as _gasBandOverride) so it survives planet
+  // regen / quality rebuilds; converted to THREE.Vector3[8] for the sim.
+  _gasBandVecs() {
+    return this._gasBandOverride
+      ? this._gasBandOverride.map((c) => new THREE.Vector3(c[0] / 255, c[1] / 255, c[2] / 255))
+      : undefined;
+  }
+  setGasBands(strip8) {
+    this._gasBandOverride = (strip8 && strip8.length === 8) ? strip8 : null;
+    if (this.gasSim) this.gasSim.setBandColors(this._gasBandVecs() || null);
+  }
+  clearGradient() {
+    if (this._grad && this._grad.tex) this._grad.tex.dispose();
+    this._grad = null;
+    this.u.uHasGradient.value = 0;
+    this.u.uGradientLut.value = this.emptyTex;
+  }
+
+  // Custom colours — override palette slots as live uniforms (no rebake, no rng).
+  // `map` keys are palette slot names ({r,g,b} arrays 0-255). Persisted so they
+  // survive planet regen / quality rebuilds (re-applied at the end of uploadPlanet).
+  _applyPaletteOverride() {
+    const m = this._palOverride; if (!m) return;
+    const u = this.u;
+    const set = (name, c) => { if (c) u[name].value.set(c[0] / 255, c[1] / 255, c[2] / 255); };
+    set('uPalDeepWater', m.deepWater); set('uPalWater', m.water); set('uPalShore', m.shore);
+    set('uPalBeach', m.beach); set('uPalLowland', m.lowland); set('uPalPlains', m.plains);
+    set('uPalForest', m.forest); set('uPalArid', m.arid); set('uPalHills', m.hills);
+    set('uPalMountain', m.mountain); set('uPalPeak', m.peak); set('uPalPolarIce', m.polarIce);
+    set('uAtmColor', m.atmCol); set('uCloudColor', m.cloudCol);
+  }
+  setPaletteOverride(map) {
+    this._palOverride = Object.assign({}, this._palOverride, map);
+    // atmosphere / cloud + biome uniforms (the biome uniforms feed the live
+    // classifyRocky path when terraform is active)
+    this._applyPaletteOverride();
+    // Biome colours live in the BAKED albedo (the default render path), so
+    // re-bake + re-upload — but ONLY when the change actually touches a baked
+    // slot. Atmosphere/cloud are pure live uniforms (never enter the surface
+    // bake), so skip the expensive re-bake for atmos/cloud-only edits. Rocky
+    // bodies only; gas kinds recolour via the gradient map. Never touches RNG.
+    const bakeKeys = Object.keys(map).filter((k) => k !== 'atmCol' && k !== 'cloudCol');
+    if (bakeKeys.length && this.planet && this.planet.setPaletteOverride) {
+      this.planet.setPaletteOverride(this._palOverride);
+      if (this.planet.getTypeConfig().kind === 'rocky') this.refreshMaps(this.planet);
+    }
+  }
+  clearPaletteOverride() {
+    this._palOverride = null;
+    if (this.planet && this.planet.clearPaletteOverride) {
+      this.planet.clearPaletteOverride();
+      if (this.planet.getTypeConfig().kind === 'rocky') this.refreshMaps(this.planet);
+    }
+    const pal = this.planet && this.planet.palette; if (!pal) return;
+    const u = this.u;
+    const set = (name, c, d) => { const x = c || d; u[name].value.set(x[0] / 255, x[1] / 255, x[2] / 255); };
+    set('uPalDeepWater', pal.deepWater, [10, 40, 64]); set('uPalWater', pal.water, [20, 80, 120]);
+    set('uPalShore', pal.shore, [60, 120, 150]); set('uPalBeach', pal.beach, [194, 178, 128]);
+    set('uPalLowland', pal.lowland, [90, 120, 66]); set('uPalPlains', pal.plains, [110, 140, 70]);
+    set('uPalForest', pal.forest, [40, 90, 40]); set('uPalArid', pal.arid, [160, 140, 90]);
+    set('uPalHills', pal.hills, [120, 110, 80]); set('uPalMountain', pal.mountain, [130, 120, 110]);
+    set('uPalPeak', pal.peak, [220, 220, 220]); set('uPalPolarIce', pal.polarIce, [235, 245, 250]);
+    set('uAtmColor', pal.atmCol, [120, 180, 220]); set('uCloudColor', pal.cloudCol, [255, 255, 255]);
   }
 
   // ---------- frame ----------
@@ -503,6 +629,7 @@ class GLRenderer {
     const tf = this.terraform;
     const atmEff = this.baseAtmThickness * tf.atmScale;
     u.uAtmThickness.value = atmEff;
+    u.uAtmDensity.value = tf.atmDensity ?? 1;
     const auroraOn = this._hasAuroraCol && (this._isGasKind || atmEff >= 0.18);
     u.uAuroraOn.value = auroraOn ? 1 : 0;
     u.uAuroraBase.value = this._isGasKind ? 0.95 : atmEff * 2.6;
@@ -511,10 +638,19 @@ class GLRenderer {
     u.uIceLine.value = tf.iceLine;
     u.uVegetation.value = tf.vegetation;
     u.uCloudMul.value = tf.cloudMul;
+    u.uCloudCover.value = tf.cloudCover ?? 0.5;
+    u.uCloudFlow.value = tf.cloudFlow ?? 1.0;
+    u.uCloudAltLow.value = tf.cloudAltLow ?? 0.03;
+    u.uCloudAltMid.value = tf.cloudAltMid ?? 0.06;
+    u.uCloudAltHigh.value = tf.cloudAltHigh ?? 0.10;
+    u.uCloudAmtLow.value = tf.cloudAmtLow ?? 1.0;
+    u.uCloudAmtMid.value = tf.cloudAmtMid ?? 0.7;
+    u.uCloudAmtHigh.value = tf.cloudAmtHigh ?? 0.5;
+    u.uCloudScatter.value = tf.cloudScatter ?? 0.6;
+    u.uCloudSeed.value = (this._cloudSeedBase ?? 0) + (tf.cloudSeed ?? 0);
     u.uEvolve.value = tf.evolve;
     u.uEvolveAmp.value = tf.evolveAmp;
     u.uVortexStrength.value = tf.flowMul ?? 1;
-    u.uProcClouds.value = tf.procClouds ?? 0;
     u.uEmission.value = tf.emission ?? 1;
     u.uAuroraStrength.value = tf.aurora ?? 1;
     u.uSnowOffset.value = tf.snowOffset ?? 0;
@@ -609,6 +745,33 @@ class GLRenderer {
       this.gl.readRenderTargetPixels(this._readRT, 0, 0, w, h, buf);
       return { data: new Uint8ClampedArray(buf.buffer.slice(0)), w, h };
     } catch (e) { return null; }
+  }
+
+  // Render the current surface flat as an equirect RGBA8 map (biomes, relief,
+  // rivers, live terraform, or the gas dye) — no sun/clouds/atmosphere. Used by
+  // the export card's surface + thermal modules so the card matches the view.
+  readSurfaceEquirect(w = 1024, h = 512) {
+    if (!this.planet) return null;
+    try {
+      if (!this._surfRT || this._surfRT.width !== w || this._surfRT.height !== h) {
+        if (this._surfRT) this._surfRT.dispose();
+        this._surfRT = new THREE.WebGLRenderTarget(w, h, {
+          type: THREE.UnsignedByteType, minFilter: THREE.LinearFilter,
+          magFilter: THREE.LinearFilter, depthBuffer: false, stencilBuffer: false,
+        });
+      }
+      const prevMat = this.quad.material, prevRT = this.gl.getRenderTarget();
+      this.u.uSurfaceMode.value = 1;
+      this.quad.material = this.planetMat;
+      this.gl.setRenderTarget(this._surfRT);
+      this.gl.render(this.scene, this.cam);
+      this.gl.setRenderTarget(prevRT);
+      this.quad.material = prevMat;
+      this.u.uSurfaceMode.value = 0;
+      const buf = new Uint8Array(w * h * 4);
+      this.gl.readRenderTargetPixels(this._surfRT, 0, 0, w, h, buf);
+      return { data: new Uint8ClampedArray(buf.buffer.slice(0)), w, h };
+    } catch (e) { this.u.uSurfaceMode.value = 0; return null; }
   }
 
   // Re-upload the surface data textures after a live re-erosion (EROSION

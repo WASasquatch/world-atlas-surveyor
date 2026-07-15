@@ -165,6 +165,19 @@ header .live::before {
   align-items: center;
 }
 
+/* Terraform sub-category divider */
+.tf-cat {
+  font-size: 8px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  font-weight: 700;
+  color: var(--accent, #7fd4ff);
+  margin: 12px 0 4px;
+  padding-bottom: 2px;
+  border-bottom: 1px solid rgba(127, 212, 255, 0.18);
+}
+.tf-cat:first-child { margin-top: 4px; }
+
 .input-row {
   display: flex;
   align-items: center;

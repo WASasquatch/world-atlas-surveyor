@@ -36,13 +36,15 @@ class Renderer {
     this.recreateStars();
   }
 
-  resize(viewW, viewH, pixelScale) {
+  resize(viewW, viewH, pixelScale, aa) {
     this.viewW = Math.max(100, Math.floor(viewW));
     this.viewH = Math.max(100, Math.floor(viewH));
     this.pixelScale = pixelScale;
-    // internal resolution is viewport / pixelScale
-    this.internalW = Math.max(50, Math.floor(this.viewW / pixelScale));
-    this.internalH = Math.max(50, Math.floor(this.viewH / pixelScale));
+    if (aa != null) this.aa = aa;
+    const ss = this.aa || 1;   // supersample factor (anti-aliasing)
+    // internal resolution is viewport / pixelScale, × the AA supersample factor
+    this.internalW = Math.max(50, Math.floor(this.viewW / pixelScale * ss));
+    this.internalH = Math.max(50, Math.floor(this.viewH / pixelScale * ss));
     this.canvas.width = this.internalW;
     this.canvas.height = this.internalH;
     this.canvas.style.width = this.viewW + 'px';

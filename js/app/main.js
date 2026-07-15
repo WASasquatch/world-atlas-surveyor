@@ -17,8 +17,10 @@ import { randomDesignation, sizeLabel } from './format.js';
 import { setUI, showLoading } from './survey-panel.js';
 import { exportCard } from './export-card.js';
 import { TerraformPanel } from './terraform.js';
+import { AppearancePanel } from './appearance.js';
 import { Quality } from '../core/quality.js';
 import { captureAnimation } from './animate.js';
+import { exportMapLayers } from './map-export.js';
 
 // ---------- renderers ----------
 const cpuRenderer = new Renderer(els.planetCanvas, els.starsCanvas);
@@ -35,6 +37,7 @@ if (glSupported) {
 let renderer = glRenderer || cpuRenderer;
 let currentPlanet = null;
 const terraform = new TerraformPanel();
+const appearance = new AppearancePanel();
 
 if (!glRenderer) {
   els.renderMode.value = 'classic';
@@ -58,6 +61,7 @@ function applyRenderMode(mode) {
     applyDisplacement(parseInt(els.displacement.value, 10) / 100);
   }
   terraform.attach(useGL ? glRenderer : null, currentPlanet);
+  appearance.attach(useGL ? glRenderer : null, currentPlanet);
   // classic mode shows the un-terraformed planet — restore baked readouts
   if (!useGL && currentPlanet) setUI(currentPlanet);
 }
@@ -119,6 +123,7 @@ function generate() {
       if (renderer === glRenderer) glRenderer.setDisplacement(dispVal);
       setUI(planet);
       terraform.attach(renderer === glRenderer ? glRenderer : null, planet);
+      appearance.attach(renderer === glRenderer ? glRenderer : null, planet);
     } catch (e) {
       console.error(e);
       els.status.textContent = 'ERROR';
@@ -133,7 +138,8 @@ function generate() {
 function fitRenderer() {
   const vp = els.planetCanvas.parentElement;
   const rect = vp.getBoundingClientRect();
-  renderer.resize(rect.width, rect.height, parseInt(els.pixelScale.value, 10));
+  const aa = els.antialias ? (parseInt(els.antialias.value, 10) || 1) : 1;
+  renderer.resize(rect.width, rect.height, parseInt(els.pixelScale.value, 10), aa);
 }
 
 // ---------- inputs ----------
@@ -189,6 +195,38 @@ els.exportAnim.addEventListener('click', async () => {
     els.exportAnim.disabled = false;
   }
 });
+
+// Layered map export — CPU decomposition to a transparent equirect PNG.
+els.exportMap.addEventListener('click', () => {
+  if (!currentPlanet) return;
+  const layers = {
+    ground: els.mapGround.checked,
+    veg: els.mapVeg.checked,
+    snow: els.mapSnow.checked,
+    water: els.mapWater.checked,
+    clouds: els.mapClouds.checked,
+  };
+  if (!Object.values(layers).some(Boolean)) { els.mapProgress.textContent = 'SELECT A LAYER'; return; }
+  els.exportMap.disabled = true;
+  els.mapProgress.textContent = 'BAKING…';
+  // Defer so the button state paints before the synchronous bake blocks.
+  setTimeout(async () => {
+    try {
+      await exportMapLayers(renderer, {
+        layers,
+        mask: els.mapMask.checked,
+        width: parseInt(els.mapRes.value, 10) || 2048,
+        planet: currentPlanet,
+      });
+      els.mapProgress.textContent = 'SAVED';
+    } catch (e) {
+      console.error(e);
+      els.mapProgress.textContent = 'EXPORT FAILED';
+    } finally {
+      els.exportMap.disabled = false;
+    }
+  }, 0);
+});
 // If the user explicitly changes type/atmosphere/size while seed is "EARTH"
 // or any easter-egg seed (VULCAN, BAJOR, etc.), roll a fresh procedural seed
 // so their override takes effect (otherwise the named-world override would
@@ -218,6 +256,7 @@ els.pixelScale.addEventListener('input', () => {
   els.pixelVal.textContent = els.pixelScale.value + '×';
   fitRenderer();
 });
+if (els.antialias) els.antialias.addEventListener('change', fitRenderer);
 els.autoRotate.addEventListener('change', () => {
   renderer.autoRotate = els.autoRotate.checked;
 });

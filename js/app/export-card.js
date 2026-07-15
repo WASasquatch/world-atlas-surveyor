@@ -15,10 +15,10 @@ function exportCard(renderer) {
     return;
   }
   const planet = renderer.planet;
-  // live simulated gas dye (finished flowing map) — used by the surface AND
-  // thermal modules; null for non-gas or if the readback isn't available
-  const gasEq = (planet.getTypeConfig && planet.getTypeConfig().kind === 'gas'
-                 && renderer && renderer.readGasEquirect) ? renderer.readGasEquirect() : null;
+  // the actual flat surface (biomes + relief + rivers + live terraform for
+  // rocky, or the simulated dye for gas) — the "as seen" map minus lighting /
+  // clouds / atmosphere. Used by the surface AND thermal modules.
+  const surfEq = (renderer && renderer.readSurfaceEquirect) ? renderer.readSurfaceEquirect() : null;
   els.exportCard.disabled = true;
   els.exportCard.textContent = 'RENDERING...';
 
@@ -383,11 +383,11 @@ function exportCard(renderer) {
         // flowing map); everything else the baked colorMap.
         const TXW = planet.texW, TXH = planet.texH;
         const surfCanvas = document.createElement('canvas');
-        if (gasEq) {
-          surfCanvas.width = gasEq.w; surfCanvas.height = gasEq.h;
+        if (surfEq) {
+          surfCanvas.width = surfEq.w; surfCanvas.height = surfEq.h;
           const gctx = surfCanvas.getContext('2d');
-          const gimg = gctx.createImageData(gasEq.w, gasEq.h);
-          gimg.data.set(gasEq.data);
+          const gimg = gctx.createImageData(surfEq.w, surfEq.h);
+          gimg.data.set(surfEq.data);
           gctx.putImageData(gimg, 0, 0);
         } else {
           surfCanvas.width = TXW; surfCanvas.height = TXH;
@@ -494,13 +494,28 @@ function exportCard(renderer) {
           'SO2': [{l:4.0,w:0.20}],
           'CO':  [{l:2.35,w:0.06},{l:4.7,w:0.08}],
         };
+        // Composition names use unicode subscripts (N₂, CO₂, CH₄/NH₃, …) but the
+        // band table is keyed by ASCII (N2, CO2, CH4). Normalise: strip
+        // subscripts and split composite labels so absorption features actually
+        // appear (previously every world drew the identical baseline curve).
+        const SUB = { '₀':'0','₁':'1','₂':'2','₃':'3','₄':'4','₅':'5','₆':'6','₇':'7','₈':'8','₉':'9' };
+        const bandsForName = (name) => {
+          const ascii = String(name).replace(/[₀-₉]/g, (ch) => SUB[ch] || ch);
+          let out = [];
+          for (let part of ascii.split('/')) {
+            part = part.trim();
+            const bb = ABSORPTION_BANDS[part];
+            if (bb) out = out.concat(bb);
+          }
+          return out;
+        };
         const N_SAMPLES = 240;
         const yvals = new Float32Array(N_SAMPLES);
         for (let s = 0; s < N_SAMPLES; s++) {
           const lam = 0.4 + (s / (N_SAMPLES - 1)) * 4.6;
           let intensity = 1.0 - Math.pow((lam - 0.4) / 4.6, 0.6) * 0.55;
           for (const c of a.composition) {
-            const bands = ABSORPTION_BANDS[c.name] || [];
+            const bands = bandsForName(c.name);
             for (const b of bands) {
               const dl = lam - b.l;
               intensity -= Math.exp(-(dl*dl) / (2 * b.w * b.w)) * (c.pct / 100) * 0.85;
@@ -582,7 +597,7 @@ function exportCard(renderer) {
         // the deep interior show through) plus a warm equatorial inner-heat
         // baseline — extreme temps, but structure visible on a calibrated scale.
         const isGasTherm = cfgRef.kind === 'gas';
-        const gasThermSrc = isGasTherm ? (gasEq || { data: null }) : null;
+        const gasThermSrc = isGasTherm ? (surfEq || { data: null }) : null;
         for (let j = 0; j < THERM_H; j++) {
           const v = (j + 0.5) / THERM_H;
           const lat = (v - 0.5) * Math.PI;
@@ -608,7 +623,14 @@ function exportCard(renderer) {
                 const cp = (cj * HMW + ci) * 3;
                 L = (planet.colorMap[cp] * 0.299 + planet.colorMap[cp+1] * 0.587 + planet.colorMap[cp+2] * 0.114) / 255;
               }
-              const inner = (1.0 - L) * 0.55 + (1.0 - Math.abs(v - 0.5) * 2.0) * 0.22;
+              // Brown dwarfs EMIT from the bright hot-rift dye (bright = hot
+              // interior showing through), so heat tracks L directly. Ordinary
+              // gas giants are the opposite: thick BRIGHT cloud tops read cold
+              // and dark rifts let the warm interior through, so heat tracks
+              // (1 - L). Without this split the brown-dwarf IR map is inverted
+              // (its cool, non-emissive cloud bands print as the hottest).
+              const heatL = cfgRef.selfEmit ? L : (1.0 - L);
+              const inner = heatL * 0.55 + (1.0 - Math.abs(v - 0.5) * 2.0) * 0.22;
               const norm = clamp(0.10 + inner * 0.82 + det(seedN ^ (i * 31 + j * 7), 0x400, -0.02, 0.02), 0, 1);
               [tr, tg, tb] = rampColor(norm);
             } else {

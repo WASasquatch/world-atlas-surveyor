@@ -9,7 +9,7 @@
 import { hashString, mulberry32 } from './core/prng.js';
 import { Perlin3D, Worley3D } from './core/noise.js';
 import { clamp, smoothstep, mix, mixRgb } from './core/color.js';
-import { erode } from './erosion.js';
+import { erodeMultiRes } from './erosion.js';
 import { PALETTES } from './data/palettes.js';
 import { pickPalette } from './data/variants.js';
 import { EARTH_MASK, EARTH_MASK_W } from './data/earth-mask.js';
@@ -395,6 +395,7 @@ class Planet {
     const nOffX = this.rng() * 100;
     const nOffY = this.rng() * 100;
     const nOffZ = this.rng() * 100;
+    this._nOffX = nOffX; this._nOffY = nOffY; this._nOffZ = nOffZ;
     // Stash on planet so the renderer can use them for resolution-independent
     // surface detail noise (sub-texel grit). Without this, every render-time
     // detail call would produce the same pattern regardless of seed.
@@ -425,22 +426,36 @@ class Planet {
         // Power fractal flavor
         h = Math.sign(h) * Math.pow(Math.abs(h), cfg.exponent);
 
-        // Worley-distorted ridges for mountainous regions
+        // ---- Multi-scale mountains ----
+        // SMALL-scale, rough ridged noise CONFINED to high ground and BROKEN
+        // into discrete orogenic belts — so mountains read as scattered ranges
+        // on the uplands with plains between, instead of one continent-sized
+        // mountainous field. (The old layer added a single LOW-frequency
+        // ridge/Worley field masked by ×0.5 noise, which blanketed whole
+        // continents in "mountain".)
         if (cfg.mountainAmount > 0) {
-          const wx = x*s*0.7 + nOffX*1.3;
-          const wy = y*s*0.7 + nOffY*1.3;
-          const wz = z*s*0.7 + nOffZ*1.3;
-          const w = clamp(1 - this.worley.noise(wx, wy, wz), 0, 1);
-          // mountain belts (mask with low-freq noise)
-          const belt = clamp(this.perlin2.fbm(x*0.5+50, y*0.5+50, z*0.5+50, 3) + 0.3, 0, 1);
-          h += w * w * belt * cfg.mountainAmount;
+          // 1) altitude gate — ranges only grow on already-elevated terrain,
+          //    so coasts and lowlands stay smooth (the base fBm keeps continents)
+          const altMask = smoothstep(0.05, 0.30, h);
+          // 2) belt gate — mid-frequency + thresholded so mountains cluster into
+          //    discrete belts with lowland gaps (much higher freq than old ×0.5)
+          const beltMask = smoothstep(-0.05, 0.42, this.perlin2.fbm(x*1.7 + 50, y*1.7 + 50, z*1.7 + 50, 4));
+          // 3) rough ridges at a SMALL scale (high freq → many small peaks) plus
+          //    a finer craggy octave for internal roughness within each range
+          const ridge = this.perlin.ridged(x*s*3.4 + nOffX*0.5, y*s*3.4 + nOffY*0.5, z*s*3.4 + nOffZ*0.5, 6);
+          const crag  = this.perlin3.ridged(x*s*7.0 + nOffZ, y*s*7.0 + nOffX, z*s*7.0 + nOffY, 4);
+          const mtn = ridge * 0.72 + crag * 0.28;                 // 0..1, ~1 on ridge crests
+          // subtract a baseline so inter-ridge saddles sit lower (peaks+valleys,
+          // i.e. broken up) rather than lifting the whole upland into a plateau
+          h += (mtn - 0.28) * altMask * beltMask * cfg.mountainAmount * 2.2;
         }
-        // Ridge fractal
+        // Fine ridged texture — subtle craggy detail on the uplands, gated so it
+        // never smothers lowlands into a uniform rough field.
         if (cfg.ridgeAmount > 0) {
-          const r = this.perlin.ridged(x*s*1.1 + nOffX*0.5, y*s*1.1 + nOffY*0.5, z*s*1.1 + nOffZ*0.5, 5);
-          // gate by another low-freq noise to keep belts
-          const gate = smoothstep(-0.1, 0.5, this.perlin2.fbm(x*0.7+20, y*0.7+20, z*0.7+20, 3));
-          h += (r - 0.5) * cfg.ridgeAmount * gate;
+          const r = this.perlin.ridged(x*s*2.4 + nOffX*0.5, y*s*2.4 + nOffY*0.5, z*s*2.4 + nOffZ*0.5, 5);
+          const gate = smoothstep(0.0, 0.5, this.perlin2.fbm(x*1.4 + 20, y*1.4 + 20, z*1.4 + 20, 3))
+                     * smoothstep(0.02, 0.25, h);
+          h += (r - 0.35) * cfg.ridgeAmount * gate * 0.7;
         }
 
         // Craters
@@ -466,7 +481,11 @@ class Planet {
           const landScale = 1.05, oceanScale = 0.5;
           if (isLand) {
             const detail = h * landScale + baseAbove;
-            h = cfg.seaLevel + detail;
+            // EARTH continents must never flood: deep Perlin troughs / mountain
+            // -valley subtraction can drive detail below 0, which would punch
+            // ocean holes into the landmasses. Floor it to a thin coastal band
+            // so the real continents stay intact while keeping upland relief.
+            h = cfg.seaLevel + Math.max(detail, 0.012);
           } else {
             const detail = h * oceanScale - baseBelow;
             h = cfg.seaLevel + detail;
@@ -600,13 +619,21 @@ class Planet {
     this.baseHeightMap = null;
     if (cfg.kind === 'rocky' && waterType) {
       this.baseHeightMap = new Float32Array(this.heightMap);   // clean base for the live EROSION slider
-      const { height, flow } = erode(this.heightMap, W, H, {
+      // pristine seed moisture so EVOLVE is reversible: bakeMoisture() overwrites
+      // this.moistureMap for evolved coastlines; dialing EVOLVE back to 0 restores
+      // the generated biome layout from this backup (see reTerrain).
+      if (this.moistureMap) this.baseMoistureMap = new Float32Array(this.moistureMap);
+      const { height, flow } = erodeMultiRes(this.heightMap, W, H, {
         seed: this.seedNum,
         seaLevel: cfg.seaLevel,
         // FIXED droplet count (not the live/auto quality tier) so a seed
         // erodes to identical terrain on every machine — "same seed = same
         // world" must not depend on hardware or on when auto-detect stepped.
         droplets: 50000,
+        // Coarse→fine pyramid: broad continental drainage + crisp fluvial cuts.
+        // Default DETAIL (0.5) is fixed here so the initial generate stays
+        // deterministic; the DETAIL slider drives it live via reTerrain().
+        detail: 0.5,
       });
       this.heightMap = height;
       this.flowMap = flow;
@@ -646,8 +673,21 @@ class Planet {
         const h = heightMap[j * W + i];
         const m = this.moistureMap[j * W + i];
 
+        // Local terrain slope (2-texel central diff, longitude cos-lat
+        // corrected) — lets the snowcap shed off steep faces so ranges read as
+        // 3D relief, matching the GL shader's live classifyRocky path.
+        const im = (i - 1 + W) % W, ip = (i + 1) % W;
+        const jm = j > 0 ? j - 1 : 0, jp = j < H - 1 ? j + 1 : H - 1;
+        const sx = heightMap[j * W + ip] - heightMap[j * W + im];
+        const sy = heightMap[jp * W + i] - heightMap[jm * W + i];
+        // correctly-rounded sqrt only (NOT Math.hypot — that's an
+        // implementation-approximated function and would break the
+        // bit-identical-bake determinism contract across JS engines)
+        const gx = sx * Math.max(0.05, cosLat);
+        const slope = Math.sqrt(gx * gx + sy * sy);
+
         // Color
-        let [r, g, b] = this.colorPixelRocky(h, m, lat, cfg, pal, x, y, z);
+        let [r, g, b] = this.colorPixelRocky(h, m, lat, cfg, pal, x, y, z, slope);
 
         // Polar ice sheet overlay — applied AFTER biome coloring. Uses a
         // HARD-threshold boundary with multi-scale noise + Worley cells so
@@ -659,10 +699,15 @@ class Planet {
           // Multi-scale latitude displacement — large embayments + medium
           // tongues + fine fractures. Sum of three scales gives complex
           // edges at every viewing scale.
-          const eLarge = this.perlin2.fbm(x*3.0+11, y*3.0+11, z*3.0+11, 3) * 0.060;
-          const eMed   = this.perlin2.fbm(x*9.0+33, y*9.0+33, z*9.0+33, 3) * 0.030;
-          const eFine  = this.perlin3.fbm(x*22+77, y*22+77, z*22+77, 2) * 0.014;
-          const sheetLat = absLatLocal + eLarge + eMed + eFine;
+          // Multi-scale edge displacement (large lobes → fine crenellation), all
+          // scales always applied so the boundary is ragged at every zoom — mirrors
+          // the GL shader's polar `e`. Deterministic (perlin add/mul only).
+          const e1 = this.perlin2.fbm(x*1.5+21, y*1.5+21, z*1.5+21, 2) * 0.10;
+          const e2 = this.perlin2.fbm(x*3.2+11, y*3.2+11, z*3.2+11, 2) * 0.060;
+          const e3 = this.perlin3.fbm(x*7.0+33, y*7.0+33, z*7.0+33, 2) * 0.034;
+          const e4 = this.perlin3.fbm(x*15+77, y*15+77, z*15+77, 2) * 0.018;
+          const e5 = this.perlin3.fbm(x*31+50, y*31+50, z*31+50, 2) * 0.010;
+          const sheetLat = absLatLocal + e1 + e2 + e3 + e4 + e5;
 
           // HARD threshold — pixel is either ice or not ice, with only a
           // tiny anti-aliased boundary band. This is the key change from
@@ -758,31 +803,128 @@ class Planet {
     this.rawColorMap = new Uint8ClampedArray(this.colorMap);
   }
 
-  // Live EROSION: re-run erosion from the saved pre-erosion base at a new
-  // strength, then re-colour / re-shade / re-mask. Rocky water types only.
-  // strength 0..2 (1 = as generated); scales droplet count + erosion rate.
-  reErode(strength) {
+  // Morph the base terrain toward an independent LARGE-SCALE continental
+  // layout. amt 0..1 (region-wipe blend so coastlines stay crisp mid-morph);
+  // scale sets continent size (scale < 1 = larger continents, > 1 = smaller /
+  // more islands). Runs on CPU BEFORE erosion so rivers + erosion follow the
+  // final shape rather than the original one.
+  computeEvolvedHeight(base, amt, scale) {
+    const W = this.texW, H = this.texH;
+    const out = new Float32Array(W * H);
+    const sc = Math.max(0.25, scale);
+    const contFreq = 0.85 * sc;                    // low freq -> big continents
+    const ph = (this.seedNum % 997) * 0.021;       // fixed target world per seed
+    const edge = 0.20;
+    const t = amt * (1 + 2 * edge) - edge;
+    const P = this.perlin, P2 = this.perlin2, P3 = this.perlin3;
+    for (let j = 0; j < H; j++) {
+      const lat = ((j + 0.5) / H) * Math.PI - Math.PI / 2;
+      const cosLat = Math.cos(lat), sinLat = Math.sin(lat);
+      for (let i = 0; i < W; i++) {
+        const lon = ((i + 0.5) / W) * 2 * Math.PI;
+        const x = cosLat * Math.cos(lon), y = sinLat, z = cosLat * Math.sin(lon);
+        // low-freq domain warp -> organic (non-blobby) coastlines
+        const wx = P.fbm(x + ph, y, z, 2) * 0.5;
+        const wy = P.fbm(x + 5.2, y + ph, z, 2) * 0.5;
+        const wz = P.fbm(x + 2.7, y, z + ph, 2) * 0.5;
+        const px = x + wx, py = y + wy, pz = z + wz;
+        const cont = P.fbm(px * contFreq + ph, py * contFreq, pz * contFreq, 5) * 1.9;
+        const detail = P2.fbm(px * 3.0 + 12, py * 3.0, pz * 3.0, 3) * 0.16;
+        const rid = 1 - Math.abs(P3.fbm(px * 2.2 * sc + 40, py * 2.2 * sc, pz * 2.2 * sc, 3));
+        const mtn = Math.max(rid - 0.5, 0) * 0.6;
+        const target = cont + detail + mtn - 0.42;   // bias for a balanced land/sea fraction
+        const region = P2.fbm(x * 1.2 + 60, y * 1.2, z * 1.2, 4) * 0.5 + 0.5;
+        const b = smoothstep(region - edge, region + edge, t);
+        const idx = j * W + i;
+        out[idx] = base[idx] * (1 - b) + target * b;
+      }
+    }
+    return out;
+  }
+
+  // Recompute moisture from the current heightMap so biome boundaries track
+  // evolved coastlines (moisture is height-warped, so it must follow terrain).
+  bakeMoisture(cfg) {
+    const W = this.texW, H = this.texH;
+    const nOffX = this._nOffX || 0, nOffY = this._nOffY || 0, nOffZ = this._nOffZ || 0;
+    const mScale = cfg.moistureScale || 1.4;
+    for (let j = 0; j < H; j++) {
+      const lat = ((j + 0.5) / H) * Math.PI - Math.PI / 2;
+      const cosLat = Math.cos(lat), sinLat = Math.sin(lat);
+      for (let i = 0; i < W; i++) {
+        const lon = ((i + 0.5) / W) * 2 * Math.PI;
+        const x = cosLat * Math.cos(lon), y = sinLat, z = cosLat * Math.sin(lon);
+        const hWarpM = (this.heightMap[j * W + i] - cfg.seaLevel) * 1.6;
+        this.moistureMap[j * W + i] = clamp(this.perlin2.fbm(
+          x * mScale + nOffZ + hWarpM * 0.5,
+          y * mScale + nOffX + hWarpM * 0.3,
+          z * mScale + nOffY + hWarpM * 0.5, 4) * 1.4 + 0.5, 0, 1);
+      }
+    }
+  }
+
+  // Live terrain re-bake: EVOLVE (terrain morph) FIRST, then multi-resolution
+  // EROSION, then moisture / colour / shade / water-mask — so the whole chain
+  // (rivers, erosion, biomes) describes the SAME final terrain. Rocky water
+  // types only. evolveAmt 0..1, evolveScale (~0.3..2), erosionStrength 0..2
+  // (1 = generated), detail 0..1 (broad valleys ↔ crisp fluvial cuts).
+  reTerrain(evolveAmt, evolveScale, erosionStrength, detail) {
     const cfg = this._cfg;
     if (!this.baseHeightMap || !cfg || cfg.kind !== 'rocky') return;
     const W = this.texW, H = this.texH;
-    if (strength < 0.03) {
-      this.heightMap = new Float32Array(this.baseHeightMap);
-      this.flowMap = new Float32Array(W * H);            // no rivers at zero erosion
+    const working = (evolveAmt > 0.001)
+      ? this.computeEvolvedHeight(this.baseHeightMap, evolveAmt, evolveScale)
+      : new Float32Array(this.baseHeightMap);
+    if (erosionStrength < 0.03) {
+      this.heightMap = working;
+      this.flowMap = new Float32Array(W * H);
     } else {
-      const droplets = Math.max(2000, Math.round(50000 * strength));   // strength 1 == the generated 50000
-      const { height, flow } = erode(this.baseHeightMap, W, H, {
+      // Fixed base droplet count + erosionScale for the intensity so the result
+      // stays hardware-independent; DETAIL biases coarse-vs-fine carving.
+      const { height, flow } = erodeMultiRes(working, W, H, {
         seed: this.seedNum,
         seaLevel: cfg.seaLevel,
-        droplets,
-        erosion: 0.30 * strength,
+        droplets: 50000,
+        detail: (detail == null ? 0.5 : detail),
+        erosionScale: erosionStrength,
       });
       this.heightMap = height;
       this.flowMap = flow;
     }
-    this.bakeSurfaceColors(cfg, this.palette);
+    if (evolveAmt > 0.001) this.bakeMoisture(cfg);
+    else if (this.baseMoistureMap) this.moistureMap.set(this.baseMoistureMap);   // restore seed biomes
+    this.bakeSurfaceColors(cfg, this._activePalette());
     this.applyBumpShading(cfg, this._displacement || 1.0);
     this.softenColorMap();
     this.bakeWaterMask(cfg);
+  }
+
+  // The palette actually used for baking: the seed palette merged with any live
+  // custom-colour override (a side field — the seed palette is never mutated, so
+  // base generation stays deterministic).
+  _activePalette() {
+    return this._palOverride ? Object.assign({}, this.palette, this._palOverride) : this.palette;
+  }
+
+  // Live custom-colour override — re-bake the surface colours (and water mask)
+  // from the merged palette. Rocky bodies only (gas recolours via the gradient
+  // map / band colours). overrides is a partial palette map ({slot:[r,g,b]}).
+  setPaletteOverride(overrides) {
+    if (!this._cfg || this._cfg.kind !== 'rocky') return;
+    this._palOverride = overrides || null;
+    this._rebakeColors();
+  }
+  clearPaletteOverride() {
+    if (!this._cfg || this._cfg.kind !== 'rocky' || !this._palOverride) return;
+    this._palOverride = null;
+    this._rebakeColors();
+  }
+  _rebakeColors() {
+    if (!this.rawColorMap || !this._cfg) return;
+    this.bakeSurfaceColors(this._cfg, this._activePalette());
+    this.applyBumpShading(this._cfg, this._displacement || 1.0);
+    this.softenColorMap();
+    this.bakeWaterMask(this._cfg);
   }
 
   // Re-apply bump shading at a new strength. Used by the Relief slider.
@@ -882,13 +1024,30 @@ class Planet {
     this.waterMaskMap = out;
   }
 
-  // Color a rocky-planet pixel based on height/moisture/latitude
-  colorPixelRocky(h, m, lat, cfg, pal, x, y, z) {
+  // Organic colour-detail multiplier (~[1-a, 1+a]) that mottles a flat biome
+  // colour into naturalistic tonal variation. A low-frequency PATCHWORK mask
+  // varies the amplitude so some regions are richly textured and others nearly
+  // flat (never a uniform grain), and the detail noise is domain-warped so the
+  // mottling flows organically with the terrain instead of reading as a screen
+  // overlay. Kept subtle (≤ ~±13%). Seed-driven → fully deterministic. Matches
+  // the GL shader's colorDetail() so the live view and the export agree.
+  _colorDetail(x, y, z) {
+    const patch = clamp(this.perlin2.fbm(x * 1.7 + 210, y * 1.7 + 210, z * 1.7 + 210, 3) * 0.5 + 0.5, 0, 1);
+    const amp = (0.35 + 0.65 * patch) * 0.17;
+    const wx = this.perlin3.fbm(x * 2.3 + 41, y * 2.3 + 41, z * 2.3 + 41, 2) * 0.20;
+    const d = this.perlin3.fbm(x * 7.5 + wx + 90, y * 7.5 + wx + 90, z * 7.5 + wx + 90, 5);
+    return 1 + clamp(d, -1, 1) * amp;
+  }
+
+  // Color a rocky-planet pixel based on height/moisture/latitude.
+  // `slope` (optional) is the local terrain gradient magnitude; where given, the
+  // snowcap sheds off steep faces so mountains read as 3D relief, not flat snow.
+  colorPixelRocky(h, m, lat, cfg, pal, x, y, z, slope = 0) {
     const absLat = Math.abs(lat) / (Math.PI / 2);  // 0 equator -> 1 pole
 
     // ----- VOLCANIC -----
     if (this.type === 'volcanic') {
-      const lavaPal = this.palette;
+      const lavaPal = pal;
       if (h < cfg.seaLevel) {
         // Lava sea: depth modulates color
         const depth = clamp((cfg.seaLevel - h) / 0.4, 0, 1);
@@ -917,7 +1076,7 @@ class Planet {
     // scorched basalt; vegetation is suppressed. Outside magma provinces,
     // the surface looks like sparse-life early Earth.
     if (this.type === 'primordial') {
-      const pp = this.palette;
+      const pp = pal;
       // Magma province map — low-frequency 3D Perlin gating where flood
       // basalts dominate. Threshold against magmaCoverage so a planet's
       // overall lava coverage matches the seed's magmaCoverage value.
@@ -1011,7 +1170,7 @@ class Planet {
 
     // ----- ICE -----
     if (this.type === 'ice') {
-      const icePal = this.palette;
+      const icePal = pal;
       let col;
       if (h < 0.05) col = icePal.lowland;
       else if (h < 0.25) col = mixRgb(icePal.lowland, icePal.plains, (h - 0.05) / 0.2);
@@ -1028,7 +1187,7 @@ class Planet {
 
     // ----- CRATERED -----
     if (this.type === 'cratered') {
-      const cp = this.palette;
+      const cp = pal;
       let col;
       if (h < -0.1) col = mixRgb(cp.crater, cp.lowland, smoothstep(-0.3, -0.1, h));
       else if (h < 0.05) col = cp.lowland;
@@ -1044,7 +1203,7 @@ class Planet {
 
     // ----- DESERT -----
     if (this.type === 'desert') {
-      const dp = this.palette;
+      const dp = pal;
       let col;
       if (h < 0)        col = mixRgb(dp.lowland, dp.plains, h + 0.5);
       else if (h < 0.1) col = mixRgb(dp.plains, dp.arid, h * 10);
@@ -1099,11 +1258,20 @@ class Planet {
     mEff = clamp(mEff + tropical * 0.15, 0, 1);
 
     let col;
-    // Beach band right above water
-    if (aboveSea < 0.02) {
-      col = pal.beach;
-    } else if (aboveSea < 0.08) {
-      col = mixRgb(pal.beach, mixRgb(pal.lowland, pal.plains, mEff), (aboveSea - 0.02) / 0.06);
+    // ---- Coastline ----
+    // Gentle shores get sandy BEACHES; steep shores and a fraction of coasts
+    // (by a regional low-freq mask + fine speckle) become rocky CLIFFS and
+    // outcrops, so the shoreline isn't a uniform sand ribbon. `slope` is the
+    // local terrain gradient (steep coast → cliff); the noises break the
+    // sand/rock boundary into a meandering, speckled edge.
+    if (aboveSea < 0.08) {
+      const lowBiome = mixRgb(pal.lowland, pal.plains, mEff);
+      const coastNoise = this.perlin2.fbm(x * 3.4 + 130, y * 3.4 + 130, z * 3.4 + 130, 4);
+      const speckle = this.perlin3.fbm(x * 20 + 9, y * 20 + 9, z * 20 + 9, 2);
+      const rk = clamp(smoothstep(0.045, 0.16, slope) + smoothstep(0.14, 0.42, coastNoise) + speckle * 0.22, 0, 1);
+      const cliffCol = mixRgb(pal.hills, pal.mountain, 0.35);   // rocky/cliff tone
+      const coastMat = mixRgb(pal.beach, cliffCol, smoothstep(0.35, 0.65, rk));
+      col = (aboveSea < 0.02) ? coastMat : mixRgb(coastMat, lowBiome, (aboveSea - 0.02) / 0.06);
     } else {
       // Biome by moisture + altitude
       const dryLand = mixRgb(pal.arid, pal.hills, smoothstep(0.05, 0.3, aboveSea));
@@ -1200,6 +1368,12 @@ class Planet {
       col = mixRgb(col, tundraTone, tundra * 0.65);
     }
 
+    // Organic colour-detail mottling — breaks the flat biome gradients into
+    // naturalistic tonal variation (applied before the snowcap so caps stay
+    // clean). Deterministic, seed-driven; adds apparent detail at any zoom.
+    const cd = this._colorDetail(x, y, z);
+    col = [col[0] * cd, col[1] * cd, col[2] * cd];
+
     // Mountain snowcap — altitude-driven with noisy breakup so caps look
     // like real snow on rugged terrain (rock outcrops on south faces,
     // exposed ridges, accumulation in basins) rather than uniform white
@@ -1231,6 +1405,11 @@ class Planet {
           // Above this threshold, expose rock — reduce snow coverage
           cover *= clamp(1 - (rocky - 0.18) * 3, 0, 1);
         }
+        // Slope-driven rock exposure — steep faces shed snow so ridges and cut
+        // valleys read as 3D relief rather than a flat white cap. Matches the
+        // GL shader's classifyRocky slope break (0.035..0.13 → up to 85% off).
+        const steep = smoothstep(0.035, 0.13, slope);
+        cover *= 1 - 0.85 * steep;
         // Snow-surface texture — isotropic mid-frequency variation
         const surfTex = this.perlin3.fbm(x*14 + 1, y*14 + 1, z*14 + 1, 2);
         let texDarken = 0;
@@ -1251,6 +1430,271 @@ class Planet {
       }
     }
     return col;
+  }
+
+  // Decompose the surface into separable equirect LAYERS for the map export:
+  // GROUND (bare land), VEGETATION, SNOW/ICE, WATER (rivers+oceans together),
+  // CLOUDS. Each is { rgb: Uint8ClampedArray(N*3), alpha: Float32Array(N) } at
+  // texW×texH, re-running the exact classifier math so composited layers match
+  // the rendered planet. rgb is DEFINED EVERYWHERE (coverage lives only in
+  // alpha) so bilinear upscaling never fringes. opts carries live-look values
+  // (riverStrength, cloudCover, cloudMul, cloudColor[0-255], ashCloud[0-255],
+  // vegetation) so the export tracks the current view; terrain constants come
+  // from the baked cfg. Deterministic (same seeded noise as generation).
+  bakeExportLayers(opts = {}) {
+    const SW = this.texW, SH = this.texH;               // source (baked map) resolution
+    const OW = Math.max(1, Math.floor(opts.width || SW));  // output resolution
+    const OH = Math.max(1, Math.floor(opts.height || SH));
+    const N = OW * OH;
+    const mk = () => ({ rgb: new Uint8ClampedArray(N * 3), alpha: new Float32Array(N) });
+    const L = { ground: mk(), veg: mk(), snow: mk(), water: mk(), clouds: mk() };
+    const cfg = this._cfg || this.getTypeConfig();
+    const pal = this._activePalette ? this._activePalette() : this.palette;
+    const put = (layer, k, c, a) => { const o = k * 3; layer.rgb[o] = c[0]; layer.rgb[o + 1] = c[1]; layer.rgb[o + 2] = c[2]; layer.alpha[k] = a; };
+
+    // Gradient-map application (per surface class), so the EXPORT reproduces the
+    // gradient look the viewport shows — including per-class targeting (index
+    // 0 water,1 rock,2 veg,3 ice,4 gas). Inlined (no color-grade import) to keep
+    // Planet free of the GL/DOM dependency. opts.gradient = {lut,mix,scale,enable,lo,hi}.
+    const G = opts.gradient && opts.gradient.lut && opts.gradient.mix > 0 ? opts.gradient : null;
+    const grade = (c, cls) => {
+      if (!G || !G.enable[cls]) return c;
+      let Lb = (c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722) / 255;
+      Lb = Lb < 0 ? 0 : Lb > 1 ? 1 : Lb;
+      if (G.scale && G.scale !== 1) { Lb = (Lb - 0.5) / G.scale + 0.5; Lb = Lb < 0 ? 0 : Lb > 1 ? 1 : Lb; }
+      Lb = G.lo[cls] + (G.hi[cls] - G.lo[cls]) * Lb; Lb = Lb < 0 ? 0 : Lb > 1 ? 1 : Lb;
+      const i = (Lb * 255) | 0, mr = G.lut[i * 3], mg = G.lut[i * 3 + 1], mb = G.lut[i * 3 + 2];
+      return [c[0] + (mr - c[0]) * G.mix, c[1] + (mg - c[1]) * G.mix, c[2] + (mb - c[2]) * G.mix];
+    };
+
+    // Bilinear sampler over an equirect source map (single channel): u wraps in
+    // longitude, v clamps in latitude. Sampling the 768-wide baked maps at the
+    // higher OUTPUT resolution — while evaluating the procedural noise below at
+    // full output resolution and thresholding coasts/rivers per output pixel —
+    // is what makes a 2K/4K export crisp instead of a blurry upscale of the bake.
+    const SH1 = SH - 1, dU = 1 / SW, dV = 1 / SH;
+    const sm = (map, u, v, fb) => {
+      if (!map) return fb;
+      const fx = u * SW - 0.5, fy = v * SH - 0.5;
+      const xf = Math.floor(fx), yf = Math.floor(fy), tx = fx - xf, ty = fy - yf;
+      const x0 = ((xf % SW) + SW) % SW, x1 = ((xf + 1) % SW + SW) % SW;
+      const y0 = yf < 0 ? 0 : yf > SH1 ? SH1 : yf, y1 = (yf + 1) < 0 ? 0 : (yf + 1) > SH1 ? SH1 : (yf + 1);
+      const a = map[y0 * SW + x0], b = map[y0 * SW + x1], c = map[y1 * SW + x0], d = map[y1 * SW + x1];
+      const top = a + (b - a) * tx, bot = c + (d - c) * tx;
+      return top + (bot - top) * ty;
+    };
+    // 3-channel bilinear for the interleaved colorMap (gas albedo upsample).
+    const smC = (u, v, ch) => {
+      const cm3 = this.colorMap; const fx = u * SW - 0.5, fy = v * SH - 0.5;
+      const xf = Math.floor(fx), yf = Math.floor(fy), tx = fx - xf, ty = fy - yf;
+      const x0 = ((xf % SW) + SW) % SW, x1 = ((xf + 1) % SW + SW) % SW;
+      const y0 = yf < 0 ? 0 : yf > SH1 ? SH1 : yf, y1 = (yf + 1) < 0 ? 0 : (yf + 1) > SH1 ? SH1 : (yf + 1);
+      const a = cm3[(y0 * SW + x0) * 3 + ch], b = cm3[(y0 * SW + x1) * 3 + ch], cc = cm3[(y1 * SW + x0) * 3 + ch], d = cm3[(y1 * SW + x1) * 3 + ch];
+      const top = a + (b - a) * tx, bot = cc + (cc !== undefined ? (d - cc) * tx : 0);
+      return top + (bot - top) * ty;
+    };
+
+    // Gas kinds: the banded albedo already bakes clouds in — expose it as GROUND.
+    if (cfg.kind === 'gas') {
+      for (let j = 0; j < OH; j++) { const v = (j + 0.5) / OH; for (let i = 0; i < OW; i++) { const u = (i + 0.5) / OW, k = j * OW + i;
+        const gc = grade([smC(u, v, 0), smC(u, v, 1), smC(u, v, 2)], 4);
+        const o = k * 3; L.ground.rgb[o] = gc[0]; L.ground.rgb[o + 1] = gc[1]; L.ground.rgb[o + 2] = gc[2]; L.ground.alpha[k] = 1; } }
+      return L;
+    }
+
+    const sea = cfg.seaLevel;
+    const COAST_AA = 0.0035;   // half-width (height units) of the crisp coast AA band
+    const iceLine = (cfg.iceLine != null) ? cfg.iceLine : 0.65;
+    const isTerr = (this.type === 'terrestrial' || this.type === 'ocean');
+    // Only terrestrial/ocean get a separable WATER layer. Exotic rocky types
+    // (ice/desert/cratered) have no ocean concept; primordial has magma-province
+    // lava lakes below sea level that a height-only ocean mask would wrongly
+    // paint as water — so those all fall through to the whole-colorPixelRocky
+    // GROUND layer instead (which paints their seas/lava correctly).
+    const palHasWater = isTerr && !!(pal.shore && pal.water && pal.deepWater);
+    const waterFallback = pal.water || [30, 60, 90];
+    const hm = this.heightMap, mm = this.moistureMap, im = this.iceMap, fm = this.flowMap, cm = this.cloudMap, am = this.ashMap;
+    const riverStrength = opts.riverStrength != null ? opts.riverStrength : 1;
+    const cloudCover = opts.cloudCover != null ? opts.cloudCover : 0.5;
+    const cloudMul = opts.cloudMul != null ? opts.cloudMul : 1;
+    const cloudCol = opts.cloudColor || [255, 255, 255];
+    const ashCol = opts.ashCloud || [58, 46, 36];
+    const vegMul = opts.vegetation != null ? opts.vegetation : 1;
+
+    for (let j = 0; j < OH; j++) {
+      const v = (j + 0.5) / OH;
+      const lat = v * Math.PI - Math.PI / 2;
+      const cosLat = Math.cos(lat), sinLat = Math.sin(lat);
+      const absLat = Math.abs(lat) / (Math.PI / 2);
+      for (let i = 0; i < OW; i++) {
+        const k = j * OW + i;
+        const u = (i + 0.5) / OW;
+        const lon = u * 2 * Math.PI;
+        const x = cosLat * Math.cos(lon), y = sinLat, z = cosLat * Math.sin(lon);
+        // Fine organic detail-warp of the MAP lookups (not the procedural noise):
+        // the 768-baked height/flow are bilinearly smooth, so at high export
+        // resolution coastlines read as soft curves and rivers as chunky bilinear
+        // paths. Displacing the sample point by a small multi-scale noise (~2
+        // source texels) crenellates coasts and meanders rivers at sub-texel
+        // scale, so a 4K export gains organic detail instead of looking 768-native.
+        const wU = this.perlin3.fbm(x * 13 + 330, y * 13 + 330, z * 13 + 330, 3) * (1.4 / SW) + this.perlin3.fbm(x * 5 + 31, y * 5 + 31, z * 5 + 31, 2) * (0.9 / SW);
+        const wV = this.perlin3.fbm(x * 13 + 540, y * 13 + 540, z * 13 + 540, 3) * (1.4 / SH) + this.perlin3.fbm(x * 5 + 61, y * 5 + 61, z * 5 + 61, 2) * (0.9 / SH);
+        const uS = u + wU, vS = v + wV;
+        // High-frequency DETAIL SYNTHESIS — the baked height is only 768 wide, so
+        // add fine multi-octave fractal relief (evaluated at full export
+        // resolution). The sea-level threshold then crenellates the coastline and
+        // the altitude/colour ramps gain sub-768 texture, so a 4K export shows
+        // real detail instead of smooth 768 blobs. Small amplitude so it textures
+        // rather than inventing land in deep ocean.
+        const hDetail = this.perlin3.fbm(x * 30 + 610, y * 30 + 610, z * 30 + 610, 4) * 0.019
+                      + this.perlin2.fbm(x * 82 + 630, y * 82 + 630, z * 82 + 630, 2) * 0.007;
+        const h = sm(hm, uS, vS, sea) + hDetail, m = sm(mm, uS, vS, 0.5);
+        // high-frequency colour GRAIN — fine surface texture (down to a few px
+        // at 4K) so land/veg read as detailed ground, not flat gradient.
+        const grainMul = 1
+          + clamp(this.perlin3.fbm(x * 70 + 700, y * 70 + 700, z * 70 + 700, 3), -1, 1) * 0.075
+          + clamp(this.perlin2.noise(x * 190 + 9, y * 190 + 9, z * 190 + 9), -1, 1) * 0.05;
+        // slope from the SOURCE-resolution central diff (cos-lat corrected) so
+        // slope-driven effects are identical at any export resolution
+        const gx = (sm(hm, uS + dU, vS, sea) - sm(hm, uS - dU, vS, sea)) * Math.max(0.05, cosLat);
+        const gy = sm(hm, uS, vS + dV, sea) - sm(hm, uS, vS - dV, sea);
+        const slope = Math.sqrt(gx * gx + gy * gy);
+        const aboveSea = h - sea;
+
+        // ---- WATER: oceans + rivers ----
+        // Crisp per-pixel coastline from the interpolated height threshold
+        // (matches the shader's h < seaLevel), not the pre-smoothed 768 mask.
+        const oceanCover = palHasWater ? clamp((sea + COAST_AA - h) / (2 * COAST_AA), 0, 1) : 0;
+        let waterCol = waterFallback;
+        if (palHasWater) {
+          const depth = clamp((sea - h) / 0.45, 0, 1);
+          waterCol = mixRgb(pal.shore, pal.water, smoothstep(0, 0.15, depth));
+          waterCol = mixRgb(waterCol, pal.deepWater, smoothstep(0.2, 0.7, depth));
+          if (depth < 0.04) waterCol = mixRgb(waterCol, [220, 235, 240], (0.04 - depth) * 12);
+        }
+
+        // ---- SNOW: polar sheet (iceMap) + mountain snowcap ----
+        const polarIce = clamp(sm(im, uS, vS, 0), 0, 1);
+        let snowCover = polarIce;
+        if (isTerr && aboveSea > 0.42) {
+          const altBand = clamp((aboveSea - 0.42) / 0.30, 0, 1);
+          const snowNoise = this.perlin2.fbm(x * 8 + 31, y * 8 + 31, z * 8 + 31, 3);
+          const effAlt = aboveSea - snowNoise * 0.10;
+          if (effAlt > 0.50) {
+            let cover = clamp((effAlt - 0.50) / 0.04, 0, 1) * altBand;
+            const rocky = this.perlin3.fbm(x * 22 + 7, y * 22 + 7, z * 22 + 7, 3);
+            if (rocky > 0.18) cover *= clamp(1 - (rocky - 0.18) * 3, 0, 1);
+            cover *= 1 - 0.85 * smoothstep(0.035, 0.13, slope);
+            snowCover = Math.max(snowCover, cover);
+          }
+        }
+
+        // ---- rivers (shader rule, on CPU) ----
+        let riverCover = 0, riverCol = null;
+        if (fm && palHasWater && aboveSea >= 0) {
+          const flow = sm(fm, uS, vS, 0);
+          const th = clamp(0.90 - 0.30 * riverStrength, 0.28, 0.92);
+          let rt = smoothstep(th, th + 0.16, flow) * (1 - smoothstep(0.10, 0.26, slope));
+          rt *= smoothstep(sea, sea + 0.015, h);
+          const climate = absLat + Math.max(aboveSea, 0) * 0.85;
+          // Match the shader river rule: cold-fade uses the polar ICE sheet
+          // (iceMap), NOT the combined snowCover (which includes mountain caps).
+          const coldFade = clamp(Math.max(polarIce, smoothstep(iceLine - 0.20, iceLine + 0.02, climate)), 0, 1);
+          rt *= (1 - coldFade);
+          riverCover = rt * clamp(0.55 + 0.35 * riverStrength, 0, 1);
+          riverCol = mixRgb(pal.shore, pal.water, clamp(flow, 0, 1));
+        }
+        if (riverCover > oceanCover) put(L.water, k, grade(riverCol, 0), clamp(riverCover, 0, 1));
+        else put(L.water, k, grade(waterCol, 0), oceanCover);
+
+        const landMask = clamp(1 - oceanCover, 0, 1);
+
+        // ---- GROUND (bare) + VEGETATION ----
+        if (isTerr) {
+          const altBoost = aboveSea > 0 ? aboveSea * 0.85 : 0;
+          const climate = absLat + altBoost;
+          const iceTrigger = iceLine - 0.05;
+          const ice = clamp((climate - iceTrigger) * 5, 0, 1);
+          const tundra = clamp((climate - (iceTrigger - 0.20)) * 5, 0, 1) * (1 - ice);
+          const tropical = clamp(1 - absLat / 0.40, 0, 1);
+          const sLat = absLat - 0.27;
+          const subtropicalDry = Math.exp(-(sLat * sLat) / 0.018) * (1 - ice) * (1 - tundra);
+          const tempD = absLat - 0.50;
+          const temperate = Math.exp(-(tempD * tempD) / 0.025) * (1 - ice) * (1 - tundra);
+          let mEff = clamp(m - subtropicalDry * 0.55, 0, 1);
+          mEff = clamp(mEff + tropical * 0.15, 0, 1);
+
+          // bare ground: coast material, or the DRY altitude ramp (no green)
+          let groundCol;
+          if (aboveSea < 0.08) {
+            const coastNoise = this.perlin2.fbm(x * 3.4 + 130, y * 3.4 + 130, z * 3.4 + 130, 4);
+            const speckle = this.perlin3.fbm(x * 20 + 9, y * 20 + 9, z * 20 + 9, 2);
+            const rk = clamp(smoothstep(0.045, 0.16, slope) + smoothstep(0.14, 0.42, coastNoise) + speckle * 0.22, 0, 1);
+            const coastMat = mixRgb(pal.beach, mixRgb(pal.hills, pal.mountain, 0.35), smoothstep(0.35, 0.65, rk));
+            groundCol = (aboveSea < 0.02) ? coastMat : mixRgb(coastMat, mixRgb(pal.arid, pal.hills, 0.25), (aboveSea - 0.02) / 0.06);
+          } else {
+            const dryLand = mixRgb(pal.arid, pal.hills, smoothstep(0.05, 0.3, aboveSea));
+            if (aboveSea < 0.25) groundCol = dryLand;
+            else if (aboveSea < 0.45) groundCol = mixRgb(dryLand, pal.hills, (aboveSea - 0.25) / 0.2);
+            else if (aboveSea < 0.7) groundCol = mixRgb(pal.hills, pal.mountain, (aboveSea - 0.45) / 0.25);
+            else groundCol = mixRgb(pal.mountain, pal.peak, smoothstep(0.7, 0.95, aboveSea));
+          }
+          if (tundra > 0) groundCol = mixRgb(groundCol, mixRgb(pal.hills, pal.arid, 0.4), tundra * 0.65);
+          // organic colour-detail mottling (identical factor applied to veg
+          // below, so the composited layers match colorPixelRocky's baked look)
+          const cd = this._colorDetail(x, y, z) * grainMul;
+          groundCol = [groundCol[0] * cd, groundCol[1] * cd, groundCol[2] * cd];
+          put(L.ground, k, grade(groundCol, 1), landMask);
+
+          // vegetation overlay — folds in the classifier's tropical/temperate
+          // green tints so the tone matches, and fades the base green with
+          // altitude the same way the ground ramp turns lowMid → hills → rock
+          // (green lives at low altitude; the alpine belt is the only green above).
+          let vegA = 0, vegCol = mixRgb(pal.plains, pal.forest, smoothstep(0.4, 0.85, mEff));
+          if (tropical > 0.05 && mEff > 0.4 && aboveSea < 0.4) {
+            const deepForest = [pal.forest[0] * 0.65, pal.forest[1] * 1.05, pal.forest[2] * 0.55];
+            vegCol = mixRgb(vegCol, deepForest, tropical * smoothstep(0.4, 0.7, mEff) * 0.55);
+          }
+          if (temperate > 0.05 && mEff > 0.3 && aboveSea < 0.5) {
+            const lum = (vegCol[0] + vegCol[1] + vegCol[2]) / 3;
+            const muted = [vegCol[0] * 0.88 + lum * 0.12, vegCol[1] * 0.88 + lum * 0.12, vegCol[2] * 0.88 + lum * 0.12];
+            vegCol = mixRgb(vegCol, muted, temperate * smoothstep(0.3, 0.6, mEff) * 0.55);
+          }
+          if (aboveSea >= 0.02) {
+            const altVeg = clamp(1 - (aboveSea - 0.25) / 0.20, 0, 1);   // full ≤0.25, gone by 0.45
+            vegA = smoothstep(0.3, 0.7, mEff) * (1 - ice) * (1 - 0.65 * tundra) * altVeg;
+            if (aboveSea > 0.18 && aboveSea < 0.55 && (1 - tundra - ice) > 0.3) {
+              const orographic = clamp(mEff + (aboveSea - 0.18) * 0.6, 0, 1);
+              const alpineAmount = smoothstep(0.55, 0.40, aboveSea) * (1 - tundra) * (1 - ice) * smoothstep(0.30, 0.55, orographic) * clamp(1 - subtropicalDry * 0.8, 0, 1);
+              if (alpineAmount > 0.05) {
+                const conifer = [pal.forest[0] * 0.55 + 35, pal.forest[1] * 0.75 + 25, pal.forest[2] * 0.55 + 30];
+                vegCol = mixRgb(vegCol, mixRgb(conifer, pal.forest, tropical * 0.6), 0.5);
+                vegA = Math.max(vegA, alpineAmount * 0.65);
+              }
+            }
+            vegA = clamp(vegA * (1 - snowCover) * landMask * vegMul, 0, 1);
+          }
+          vegCol = [vegCol[0] * cd, vegCol[1] * cd, vegCol[2] * cd];
+          put(L.veg, k, grade(vegCol, 2), vegA);
+        } else {
+          const c0 = this.colorPixelRocky(h, m, lat, cfg, pal, x, y, z, slope);
+          const c = [c0[0] * grainMul, c0[1] * grainMul, c0[2] * grainMul];
+          put(L.ground, k, grade(c, 1), landMask);
+          put(L.veg, k, c, 0);
+        }
+
+        // ---- SNOW colour ----
+        put(L.snow, k, grade(pal.polarIce || [232, 240, 248], 3), snowCover);
+
+        // ---- CLOUDS ----
+        let cc = 0;
+        if (cm) { const covShift = (cloudCover - 0.5) * 0.55; cc = clamp(clamp(sm(cm, u, v, 0) + covShift, 0, 1) * cloudMul, 0, 1); }
+        const ashHere = am ? clamp(sm(am, u, v, 0), 0, 1) : 0;
+        const cloudRgb = (ashHere > 0.02) ? mixRgb(cloudCol, ashCol, ashHere) : cloudCol;
+        put(L.clouds, k, grade(cloudRgb, 4), cc);
+      }
+    }
+    return L;
   }
 
   // Apply soft bump shading from height map (used to create height/relief).

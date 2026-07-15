@@ -1,6 +1,6 @@
 // Terrain erosion — deterministic hydraulic droplet erosion + thermal
 // relaxation for equirectangular height fields, plus a water flow-accumulation
-// map used to render rivers. Self-contained: no external deps, pure JS.
+// map used to render rivers.
 //
 // Model (Beyer / Sebastian Lague style): thousands of rain droplets are
 // dropped at seeded random positions, each rolls downhill along the bilinearly
@@ -14,7 +14,7 @@
 // (more rain lifts the whole log-normalised map toward 1, so overland never
 // reads faint). Instead we treat the droplet `runoff` as a per-cell rainfall
 // weight and route it downhill with a depression-filling drainage
-// accumulation (priority-flood + D8) over the *eroded* terrain. That yields
+// accumulation (priority-flood + MFD-D8) over the *eroded* terrain. That yields
 // true discharge with a large dynamic range — a handful of trunk rivers drain
 // thousands of cells and read ~1, diffuse hillslope flow reads faint — and is
 // stable across quality settings. The result is then log-scaled and
@@ -295,13 +295,20 @@ function erode(heightMap, W, H, opts) {
   }
 
   // ---------- 3. FLOW MAP: drainage accumulation → log-normalise ----------
-  const flow = buildFlowMap(height, runoff, W, H, seaLevel, o.flowBoost);
+  // Skippable (computeFlow:false) for the coarse pyramid passes below, whose
+  // flow maps are discarded — only the finest pass renders rivers.
+  const flow = (o.computeFlow === false)
+    ? null
+    : buildFlowMap(height, runoff, W, H, seaLevel, o.flowBoost);
   return { height, flow };
 }
 
-// Priority-flood (Barnes et al. + epsilon) depression handling followed by D8
-// drainage accumulation, weighted by per-cell runoff. Returns the normalised
-// 0..1 flow map (0 over ocean). Everything here is X-wrap / Y-clamp aware.
+// Priority-flood (Barnes et al. + epsilon) depression handling followed by
+// MFD-D8 (multiple-flow-direction) drainage accumulation, weighted by per-cell
+// runoff. Fractional multi-neighbour routing (vs single-receiver D4) is what
+// keeps rendered rivers off the cardinal grid — flow follows the true downslope
+// azimuth instead of a 90° staircase. Returns the normalised 0..1 flow map
+// (0 over ocean). Everything here is X-wrap / Y-clamp aware.
 //
 // Why priority-flood: real terrain (and freshly eroded terrain) is riddled
 // with closed depressions. A naive steepest-descent router dead-ends every
@@ -372,25 +379,75 @@ function buildFlowMap(height, runoff, W, H, seaLevel, flowBoost) {
     filled[lo] = height[lo]; seen[lo] = 1; heapPush(lo);
   }
 
-  // Grow the drainage tree outward, recording each cell's downstream neighbour.
+  // Grow the drainage tree outward over the D8 (8-connected) surface, recording
+  // each cell's downstream parent. Using diagonals here (not just cardinals)
+  // gives the filled surface a diagonally-connected descent so the MFD pass
+  // below can route flow along true-diagonal thalwegs instead of a cardinal
+  // zigzag. Same X-wrap / Y-clamp math as everywhere; at pole rows a diagonal
+  // collapses onto a cardinal cell (already `seen`), which is harmlessly skipped.
   while (hn > 0) {
     const c = heapPop();
     order[on++] = c;
     const j = (c / W) | 0, i = c - j * W;
     const jn = j > 0 ? j - 1 : 0, js = j < Hm1 ? j + 1 : Hm1;
     const iw = (i - 1 + W) % W, ie = (i + 1) % W;
-    const nb0 = j * W + iw, nb1 = j * W + ie, nb2 = jn * W + i, nb3 = js * W + i;
+    const nb0 = j * W + iw,  nb1 = j * W + ie,  nb2 = jn * W + i, nb3 = js * W + i;
+    const nb4 = jn * W + iw, nb5 = jn * W + ie, nb6 = js * W + iw, nb7 = js * W + ie;
     if (!seen[nb0]) { seen[nb0] = 1; filled[nb0] = Math.max(height[nb0], filled[c] + EPS); down[nb0] = c; heapPush(nb0); }
     if (!seen[nb1]) { seen[nb1] = 1; filled[nb1] = Math.max(height[nb1], filled[c] + EPS); down[nb1] = c; heapPush(nb1); }
     if (!seen[nb2]) { seen[nb2] = 1; filled[nb2] = Math.max(height[nb2], filled[c] + EPS); down[nb2] = c; heapPush(nb2); }
     if (!seen[nb3]) { seen[nb3] = 1; filled[nb3] = Math.max(height[nb3], filled[c] + EPS); down[nb3] = c; heapPush(nb3); }
+    if (!seen[nb4]) { seen[nb4] = 1; filled[nb4] = Math.max(height[nb4], filled[c] + EPS); down[nb4] = c; heapPush(nb4); }
+    if (!seen[nb5]) { seen[nb5] = 1; filled[nb5] = Math.max(height[nb5], filled[c] + EPS); down[nb5] = c; heapPush(nb5); }
+    if (!seen[nb6]) { seen[nb6] = 1; filled[nb6] = Math.max(height[nb6], filled[c] + EPS); down[nb6] = c; heapPush(nb6); }
+    if (!seen[nb7]) { seen[nb7] = 1; filled[nb7] = Math.max(height[nb7], filled[c] + EPS); down[nb7] = c; heapPush(nb7); }
   }
 
-  // Accumulate discharge from high to low (reverse of pop order): by the time a
-  // cell pushes its total downstream, all cells draining into it have summed in.
+  // MFD-D8 (multiple-flow-direction) accumulation. Iterate high→low (reverse of
+  // the pop order = strictly decreasing filled height, so every cell's inflow is
+  // complete before it distributes) and split each cell's discharge among ALL
+  // strictly-lower D8 neighbours, weighted by slope^4 where slope = drop /
+  // distance (distance 1 for cardinals, √2 for diagonals). Single-receiver D4
+  // routing forced all discharge into a 1-cell cardinal chain, so a diagonal
+  // valley could only be drawn as a 90° staircase; MFD lets flow follow the true
+  // continuous downslope azimuth and spreads a little into off-axis neighbours,
+  // which also gives bilinear texture sampling the sub-cell gradient it needs to
+  // reconstruct a smooth curve after thresholding. Deterministic: only IEEE
+  // add/sub/mul/div and the constant √2 (correctly-rounded sqrt), with the
+  // exponent applied by integer repeated-squaring — no Math.pow, no atan/D∞
+  // transcendentals, no RNG. `down[]` is the mass-conserving fallback for true
+  // sinks (no lower neighbour), which only happens at outlets/ocean.
+  const SQ2 = Math.SQRT2;
+  const INVD = Float32Array.of(1, 1, 1, 1, 1 / SQ2, 1 / SQ2, 1 / SQ2, 1 / SQ2); // W E N S NW NE SW SE
+  const NBi = new Int32Array(8), WTa = new Float32Array(8);
   for (let k = on - 1; k >= 0; k--) {
-    const c = order[k], d = down[c];
-    if (d >= 0) acc[d] += acc[c];
+    const c = order[k];
+    const ac = acc[c], fc = filled[c];
+    const j = (c / W) | 0, i = c - j * W;
+    const jn = j > 0 ? j - 1 : 0, js = j < Hm1 ? j + 1 : Hm1;
+    const iw = (i - 1 + W) % W, ie = (i + 1) % W;
+    NBi[0] = j * W + iw;  NBi[1] = j * W + ie;  NBi[2] = jn * W + i;  NBi[3] = js * W + i;
+    NBi[4] = jn * W + iw; NBi[5] = jn * W + ie; NBi[6] = js * W + iw; NBi[7] = js * W + ie;
+    // Pole rows: the clamped diagonals collapse onto the E/W cardinals (the
+    // N/S cardinal collapses onto c itself, harmlessly filtered by drop>0).
+    // Skip the collapsed diagonal slots so a cell isn't weighted twice.
+    const topPole = jn === j, botPole = js === j;
+    let wsum = 0, m = 0;
+    for (let t = 0; t < 8; t++) {
+      if ((topPole && (t === 4 || t === 5)) || (botPole && (t === 6 || t === 7))) continue;
+      const drop = fc - filled[NBi[t]];
+      if (drop > 0) {
+        let s = drop * INVD[t];
+        s = s * s; s = s * s;            // slope^4 (integer exponent, no Math.pow)
+        WTa[m] = s; NBi[m] = NBi[t]; wsum += s; m++;
+      }
+    }
+    if (wsum > 0) {
+      const inv = ac / wsum;
+      for (let t = 0; t < m; t++) acc[NBi[t]] += WTa[t] * inv;
+    } else if (down[c] >= 0) {
+      acc[down[c]] += ac;
+    }
   }
 
   // Log-scale + normalise over LAND only. Ocean cells are drainage sinks that
@@ -410,4 +467,173 @@ function buildFlowMap(height, runoff, W, H, seaLevel, flowBoost) {
   return flow;
 }
 
-export { erode };
+// ============================ MULTI-RESOLUTION ============================
+// A single-resolution droplet sim can't carve both scales of drainage at once:
+// with a fixed step of one cell and a bounded lifetime, a droplet at native
+// resolution dies long before it can traverse a continent, so broad
+// continental valleys never form — and simply cranking the erosion rate just
+// smears the fine detail. The classic fix is a coarse→fine PYRAMID cascade:
+//
+//   1. Downsample the terrain to a coarse grid where one droplet lifetime spans
+//      a whole continent, and erode there. Broad trunk valleys and basins form.
+//      Take the height *change* (delta), upsample it, add it back to the full
+//      field — this injects the large-scale drainage without touching fine
+//      texel detail.
+//   2. Repeat at an intermediate resolution to refine regional valleys.
+//   3. Erode once more at NATIVE resolution. Water now follows the broad
+//      valleys already carved into the field and incises crisp fluvial channels
+//      and cuts on top of them. This finest pass also produces the flow map
+//      (rivers) over the fully-combined terrain, so rivers are drawn from the
+//      final surface, not an intermediate one.
+//
+// DETERMINISM: every level's droplet count is a fixed constant (derived from
+// the base count by area ratio, not from any quality tier), and each level runs
+// on its own salted mulberry32 stream. Same (seed, detail, erosionScale) →
+// bit-identical terrain on every machine.
+
+// Box-downsample an equirect field by an integer factor. X wraps (the seam is
+// continuous); Y is treated as-is (rows average within the block). Requires
+// W % f === 0 && H % f === 0 (callers guarantee this).
+function downsampleField(src, W, H, f) {
+  const w = (W / f) | 0, h = (H / f) | 0;
+  const out = new Float32Array(w * h);
+  const inv = 1 / (f * f);
+  for (let j = 0; j < h; j++) {
+    const y0 = j * f;
+    for (let i = 0; i < w; i++) {
+      const x0 = i * f;
+      let s = 0;
+      for (let dy = 0; dy < f; dy++) {
+        const row = (y0 + dy) * W;
+        for (let dx = 0; dx < f; dx++) s += src[row + ((x0 + dx) % W)];
+      }
+      out[j * w + i] = s * inv;
+    }
+  }
+  return out;
+}
+
+// Bilinear-upsample a coarse (w×h) equirect field to W×H. X wraps, Y clamps.
+// Pixel-center aligned so the round-trip stays registered with downsampleField.
+function upsampleField(src, w, h, W, H) {
+  const out = new Float32Array(W * H);
+  const wm = w, hm1 = h - 1;
+  for (let j = 0; j < H; j++) {
+    const gy = ((j + 0.5) * h) / H - 0.5;
+    const y0 = Math.floor(gy), fy = gy - y0;
+    const y0c = y0 < 0 ? 0 : y0 > hm1 ? hm1 : y0;
+    const y1 = y0 + 1, y1c = y1 < 0 ? 0 : y1 > hm1 ? hm1 : y1;
+    const rowN = y0c * w, rowS = y1c * w;
+    for (let i = 0; i < W; i++) {
+      const gx = ((i + 0.5) * w) / W - 0.5;
+      const x0 = Math.floor(gx), fx = gx - x0;
+      const x0w = ((x0 % wm) + wm) % wm, x1w = (x0w + 1) % wm;
+      const a = src[rowN + x0w], b = src[rowN + x1w];
+      const c = src[rowS + x0w], d = src[rowS + x1w];
+      out[j * W + i] = (a * (1 - fx) + b * fx) * (1 - fy)
+                     + (c * (1 - fx) + d * fx) * fy;
+    }
+  }
+  return out;
+}
+
+/**
+ * Multi-resolution erosion — coarse→fine pyramid cascade (see block comment).
+ *
+ * @param {Float32Array} heightMap  length W*H, row-major (NOT mutated).
+ * @param {number} W, H             equirect dims (longitude wraps, lat clamps).
+ * @param {object} opts
+ *   seed         {number}  required — deterministic RNG root.
+ *   seaLevel     {number}  ocean / drainage-outlet level.
+ *   droplets     {number}  base (native-level) droplet count; default 50000.
+ *   detail       {number}  0..1 — fine-cut emphasis. Low = broad, smooth
+ *                          valleys; high = crisp, deeply incised fluvial
+ *                          channels. Scales the native pass's erosion rate.
+ *   erosionScale {number}  overall intensity multiplier (the EROSION slider);
+ *                          1 = default. Multiplies every level's erosion rate.
+ * @returns {{ height: Float32Array, flow: Float32Array }}  final terrain + rivers.
+ */
+function erodeMultiRes(heightMap, W, H, opts) {
+  opts = opts || {};
+  if (typeof opts.seed !== 'number' || !isFinite(opts.seed)) {
+    throw new Error('erodeMultiRes: opts.seed (finite number) is required');
+  }
+  const baseDrops = (opts.droplets != null ? opts.droplets : DEFAULTS.droplets) | 0;
+  const detail = opts.detail == null ? 0.5 : Math.max(0, Math.min(1, opts.detail));
+  const eScale = opts.erosionScale == null ? 1 : opts.erosionScale;
+  const seaLevel = opts.seaLevel;
+
+  // Pyramid levels, COARSE → FINE. `f` is the downsample factor (1 = native).
+  //   erode  — base erosion rate at that level (before eScale / detail).
+  //   thermal— relaxation passes (more at coarse levels → smoother broad valleys).
+  //   dropScale — droplet-density boost (coarse levels get a little extra to
+  //               define trunk drainage cleanly; still a fixed constant).
+  // The native pass (f=1) alone emits the flow map, over the combined terrain.
+  const LEVELS = [
+    { f: 4, radius: 2, erode: 0.34, thermal: 5, dropScale: 1.5 },
+    { f: 2, radius: 2, erode: 0.30, thermal: 3, dropScale: 1.2 },
+    { f: 1, radius: 3, erode: 0.28, thermal: 3, dropScale: 1.0 },
+  ].filter((L) => W % L.f === 0 && H % L.f === 0);
+
+  const NB = W * H;
+  let base = new Float32Array(heightMap);
+  let flow = null;
+
+  for (let li = 0; li < LEVELS.length; li++) {
+    const L = LEVELS[li];
+    const isNative = L.f === 1;
+    const w = (W / L.f) | 0, h = (H / L.f) | 0;
+    const cells = w * h;
+    // DETAIL / erosion-scale knob — applied to the MID + NATIVE passes (the
+    // coarse f>=4 pass stays fixed so continental drainage is stable at any
+    // setting). It shifts the fine-and-regional erosion between BROAD/SMOOTH and
+    // FINE/SHARP across four coupled levers so the change is clearly visible:
+    //   rate  — deeper incision,      brush — narrower channels,
+    //   thermal — fewer smoothing passes (sharp cuts survive),
+    //   droplets — more tributaries.
+    // detail 0.5 == each level's baseline, so the seed's generated look is
+    // unchanged at the neutral setting (base generate uses detail 0.5).
+    const dtl = L.f <= 2;   // mid + native carry DETAIL; coarse is fixed
+    const rateMul = dtl ? (0.40 + 1.20 * detail) : 1.0;       // 0.4 .. 1.6 (mid = 1.0)
+    const dropMul = dtl ? (0.50 + 1.00 * detail) : 1.0;       // 0.5 .. 1.5 (mid = 1.0)
+    const radius = dtl ? Math.max(1, Math.round(L.radius + (0.5 - detail) * 4.0)) : L.radius;
+    const thermal = dtl ? Math.max(1, Math.round(L.thermal + (0.5 - detail) * 4.0)) : L.thermal;
+    // Constant droplet DENSITY across levels (count ∝ area) × per-level boost ×
+    // the DETAIL density multiplier. Fixed integers → hardware-independent.
+    const drops = Math.max(1500, Math.round(baseDrops * (cells / NB) * L.dropScale * dropMul));
+
+    const src = isNative ? base : downsampleField(base, W, H, L.f);
+    const res = erode(src, w, h, {
+      seed: (opts.seed >>> 0) ^ (0x2C9E5 * (li + 1)),   // distinct stream / level
+      seaLevel,
+      droplets: drops,
+      erosionRadius: radius,
+      erosion: L.erode * eScale * rateMul,
+      thermal,
+      computeFlow: isNative,     // only the finest pass builds the river map
+    });
+
+    if (isNative) {
+      base = res.height;         // src === base, so this already carries the
+      flow = res.flow;           // upsampled coarse deltas from prior levels
+    } else {
+      // Inject only the coarse pass's CHANGE (delta), upsampled — this adds the
+      // broad valley without disturbing the fine texel content of `base`.
+      // The coarse pass is used for INCISION (carving continental drainage), not
+      // for building land: its deposition, upsampled, would raise broad coastal
+      // shelves above sea and inflate the land fraction. So carving (negative
+      // delta) is kept in full while deposition (positive) is heavily damped —
+      // local coastal deposition is left to the native pass, matching the
+      // single-resolution land balance.
+      const delta = new Float32Array(cells);
+      const hgt = res.height;
+      for (let k = 0; k < cells; k++) delta[k] = hgt[k] - src[k];
+      const up = upsampleField(delta, w, h, W, H);
+      for (let k = 0; k < NB; k++) { const d = up[k]; base[k] += d < 0 ? d : d * 0.15; }
+    }
+  }
+
+  return { height: base, flow: flow || new Float32Array(NB) };
+}
+
+export { erode, erodeMultiRes };

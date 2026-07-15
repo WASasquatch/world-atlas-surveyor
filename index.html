@@ -91,6 +91,14 @@
           <input type="range" id="pixelScale" min="1" max="6" value="3" step="1">
           <span class="value-display" id="pixelVal">3×</span>
         </div>
+        <div class="input-row" style="margin-top:4px;" title="Anti-aliasing — supersample the render at 2×/4× and downsample for smooth edges (heavier). Exports supersample automatically.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">AA</span>
+          <select id="antialias" style="flex:1;">
+            <option value="1">OFF</option>
+            <option value="2" selected>2× SSAA</option>
+            <option value="4">4× SSAA</option>
+          </select>
+        </div>
         <div class="input-row" style="margin-top:4px;">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SPIN</span>
           <input type="checkbox" id="autoRotate" checked>
@@ -132,8 +140,74 @@
         </div>
       </div>
 
+      <div class="section" id="appearanceSection">
+        <div class="section-label">SURFACE COLOUR</div>
+        <div class="input-row" title="Gradient map — upload any image; the world is recoloured by luminance through the image's colour ramp (Photoshop gradient map). Works on every body type, including gas giants.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">IMAGE</span>
+          <input type="file" id="gradImage" accept="image/*" style="flex:1;font-size:9px;color:var(--text-dim);">
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Gradient-map intensity — blend between the original colours (0%) and the full gradient-map remap (100%).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">GRADE</span>
+          <input type="range" id="gradIntensity" min="0" max="100" value="100" step="5">
+          <span class="value-display" id="gradIntensityVal">100%</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Gradient scale — spreads the colour ramp across the world's tonal range. Increase to widen tight topographic banding into broad, smooth zones; decrease for higher-contrast, tighter bands.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SCALE</span>
+          <input type="range" id="gradScale" min="25" max="400" value="100" step="5" disabled>
+          <span class="value-display" id="gradScaleVal">1.00×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">&nbsp;</span>
+          <button id="gradClear" class="preset-btn" style="flex:1;">CLEAR GRADIENT</button>
+        </div>
+        <div id="gradStatus" style="display:none;font-size:8px;color:var(--accent, #7fd4ff);letter-spacing:0.5px;margin-top:3px;line-height:1.3;"></div>
+        <div id="gradTargets" style="display:none;margin-top:5px;">
+          <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:3px;line-height:1.3;">TARGETS — tick a class to recolour it; LO/HI pick its slice of the ramp so classes stay distinct.</div>
+          <div class="input-row" title="Apply the gradient to OCEANS/RIVERS. LO/HI = which part of the ramp water maps to.">
+            <input type="checkbox" id="gtWaterEn" checked><span style="font-size:9px;color:var(--text-dim);width:38px;letter-spacing:1px;margin-left:3px;">WATER</span>
+            <input type="range" id="gtWaterLo" min="0" max="100" value="0" step="5" style="flex:1;"><input type="range" id="gtWaterHi" min="0" max="100" value="100" step="5" style="flex:1;">
+          </div>
+          <div class="input-row" style="margin-top:3px;" title="Apply the gradient to bare LAND / rock. LO/HI = its slice of the ramp.">
+            <input type="checkbox" id="gtLandEn" checked><span style="font-size:9px;color:var(--text-dim);width:38px;letter-spacing:1px;margin-left:3px;">LAND</span>
+            <input type="range" id="gtLandLo" min="0" max="100" value="0" step="5" style="flex:1;"><input type="range" id="gtLandHi" min="0" max="100" value="100" step="5" style="flex:1;">
+          </div>
+          <div class="input-row" style="margin-top:3px;" title="Apply the gradient to VEGETATION. LO/HI = its slice of the ramp.">
+            <input type="checkbox" id="gtVegEn" checked><span style="font-size:9px;color:var(--text-dim);width:38px;letter-spacing:1px;margin-left:3px;">VEG</span>
+            <input type="range" id="gtVegLo" min="0" max="100" value="0" step="5" style="flex:1;"><input type="range" id="gtVegHi" min="0" max="100" value="100" step="5" style="flex:1;">
+          </div>
+          <div class="input-row" style="margin-top:3px;" title="Apply the gradient to ICE / SNOW. LO/HI = its slice of the ramp.">
+            <input type="checkbox" id="gtIceEn" checked><span style="font-size:9px;color:var(--text-dim);width:38px;letter-spacing:1px;margin-left:3px;">ICE</span>
+            <input type="range" id="gtIceLo" min="0" max="100" value="0" step="5" style="flex:1;"><input type="range" id="gtIceHi" min="0" max="100" value="100" step="5" style="flex:1;">
+          </div>
+        </div>
+        <div class="input-row" style="margin-top:6px;" title="Custom world colours (enhanced GL mode). Rocky worlds: each swatch recolours a group of surface bands. Gas / ice giants / brown dwarfs: the first five swatches recolour the cloud bands (relabelled BAND 1–5).">
+          <span id="lblWater" style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">WATER</span>
+          <input type="color" id="palWater" value="#1d5d82" style="flex:1;height:18px;">
+          <span id="lblLand" style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;margin-left:6px;">LAND</span>
+          <input type="color" id="palLand" value="#5d8a4a" style="flex:1;height:18px;">
+        </div>
+        <div class="input-row" style="margin-top:4px;">
+          <span id="lblVeg" style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">VEG</span>
+          <input type="color" id="palVeg" value="#2e5a30" style="flex:1;height:18px;">
+          <span id="lblRock" style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;margin-left:6px;">ROCK</span>
+          <input type="color" id="palRock" value="#5d5048" style="flex:1;height:18px;">
+        </div>
+        <div class="input-row" style="margin-top:4px;">
+          <span id="lblIce" style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">ICE</span>
+          <input type="color" id="palIce" value="#e8f0f8" style="flex:1;height:18px;">
+          <span style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;margin-left:6px;">ATMOS</span>
+          <input type="color" id="palAtmos" value="#5a9adf" style="flex:1;height:18px;">
+        </div>
+        <div class="input-row" style="margin-top:4px;">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">CLOUD</span>
+          <input type="color" id="palCloud" value="#f0f4f8" style="flex:1;height:18px;">
+          <button id="palReset" class="preset-btn" style="flex:1;margin-left:6px;">RESET COLOURS</button>
+        </div>
+      </div>
+
       <div class="section" id="terraformSection">
         <div class="section-label">TERRAFORM <span class="value-display" style="font-size:8px;">LIVE · GL</span></div>
+        <div class="tf-cat">CLIMATE &amp; SURFACE</div>
         <div class="input-row" title="Sea level — raise to flood continents, lower to drain oceans.">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SEA</span>
           <input type="range" id="tfSea" min="-60" max="60" value="0" step="1">
@@ -149,27 +223,102 @@
           <input type="range" id="tfIce" min="0" max="100" value="50" step="1">
           <span class="value-display" id="tfIceVal">BASE</span>
         </div>
-        <div class="input-row" style="margin-top:4px;" title="Cloud cover multiplier.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">CLOUD</span>
-          <input type="range" id="tfCloud" min="0" max="200" value="100" step="5">
-          <span class="value-display" id="tfCloudVal">1.0×</span>
-        </div>
-        <div class="input-row" style="margin-top:4px;" title="Atmosphere density — haze and halo strength.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">ATMOS</span>
-          <input type="range" id="tfAtmo" min="0" max="150" value="100" step="5">
-          <span class="value-display" id="tfAtmoVal">1.0×</span>
-        </div>
-        <div class="input-row" style="margin-top:4px;" title="Terrain evolution — at full strength the planet becomes an entirely new continent layout.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EVOLVE</span>
-          <input type="range" id="tfEvolve" min="0" max="100" value="0" step="1">
-          <span class="value-display" id="tfEvolveVal">OFF</span>
-        </div>
         <div class="input-row" style="margin-top:4px;" title="Snow line offset — high = bare mountains, low = total ice coverage. Snow lowers toward the poles.">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SNOW</span>
           <input type="range" id="tfSnow" min="-100" max="100" value="0" step="5">
           <span class="value-display" id="tfSnowVal">BASE</span>
         </div>
-        <div class="input-row" style="margin-top:4px;" title="Vortex / current-flow strength (~100x range). Shears clouds and gas-giant bands.">
+
+        <div class="tf-cat">TERRAIN &amp; WATER <span style="color:var(--text-dim);font-weight:normal;">· re-bakes on release</span></div>
+        <div class="input-row" title="Terrain evolution — morphs toward a new continent layout (re-bakes on release, before erosion). Full strength = an entirely new world.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EVOLVE</span>
+          <input type="range" id="tfEvolve" min="0" max="100" value="0" step="5">
+          <span class="value-display" id="tfEvolveVal">OFF</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Evolution feature scale — BROAD = large continents, FINE = smaller landmasses / more islands.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">E.SCALE</span>
+          <input type="range" id="tfEvolveScale" min="0" max="100" value="50" step="5">
+          <span class="value-display" id="tfEvolveScaleVal">MED</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="River visibility — how much of the erosion flow network renders as rivers. 0 hides them.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">RIVERS</span>
+          <input type="range" id="tfRivers" min="0" max="200" value="100" step="5">
+          <span class="value-display" id="tfRiversVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Erosion strength — re-carves the terrain and river network from a clean base (releases to apply).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EROSION</span>
+          <input type="range" id="tfErosion" min="0" max="200" value="100" step="10">
+          <span class="value-display" id="tfErosionVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Erosion detail — multi-resolution balance. Coarse passes always carve broad continental drainage; this dials the fine native pass. Low = smooth, broad valleys; high = crisp, deeply-incised fluvial channels and cuts (releases to apply).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">DETAIL</span>
+          <input type="range" id="tfDetail" min="0" max="100" value="50" step="10">
+          <span class="value-display" id="tfDetailVal">MED</span>
+        </div>
+
+        <div class="tf-cat">CLOUDS</div>
+        <div class="input-row" title="Cloud opacity / density multiplier (how thick the clouds read).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">OPACITY</span>
+          <input type="range" id="tfCloud" min="0" max="200" value="100" step="5">
+          <span class="value-display" id="tfCloudVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Cloud COVERAGE — how much of the sky is clouded (shifts the coverage threshold). Independent of opacity.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">COVER</span>
+          <input type="range" id="tfCloudCover" min="0" max="100" value="50" step="5">
+          <span class="value-display" id="tfCloudCoverVal">50%</span>
+        </div>
+        <div style="font-size:8px;color:var(--text-dim);letter-spacing:0.5px;margin-top:5px;">DECKS — altitude ← → amount, per layer</div>
+        <div class="input-row" style="margin-top:2px;" title="LOW deck (cumulus / stratocumulus): puffy broken cellular clouds + fair-weather specks. Left = altitude, right = amount.">
+          <span style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;">LOW</span>
+          <input type="range" id="tfCloudAltLow" min="0" max="20" value="3" step="1" style="flex:1;" title="LOW altitude"><input type="range" id="tfCloudAmtLow" min="0" max="150" value="100" step="5" style="flex:1;" title="LOW amount">
+        </div>
+        <div class="input-row" style="margin-top:2px;" title="MID deck (alto / frontal banks): medium cloud banks. Left = altitude, right = amount.">
+          <span style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;">MID</span>
+          <input type="range" id="tfCloudAltMid" min="0" max="20" value="6" step="1" style="flex:1;" title="MID altitude"><input type="range" id="tfCloudAmtMid" min="0" max="150" value="70" step="5" style="flex:1;" title="MID amount">
+        </div>
+        <div class="input-row" style="margin-top:2px;" title="HIGH deck (cirrus): wispy stretched streaks. Left = altitude, right = amount.">
+          <span style="font-size:9px;color:var(--text-dim);width:40px;letter-spacing:1px;">HIGH</span>
+          <input type="range" id="tfCloudAltHigh" min="0" max="20" value="10" step="1" style="flex:1;" title="HIGH altitude"><input type="range" id="tfCloudAmtHigh" min="0" max="150" value="50" step="5" style="flex:1;" title="HIGH amount">
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Cloud scattering — forward-scatter silver lining / glow intensity on sun-facing cloud.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SCATTER</span>
+          <input type="range" id="tfCloudScatter" min="0" max="200" value="60" step="5">
+          <span class="value-display" id="tfCloudScatterVal">0.6×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Cloud flow — strength of the atmospheric-current warp (curl + zonal jets) that advects the decks. 0 = static, higher = stronger banding/streaming.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">FLOW</span>
+          <input type="range" id="tfCloudFlow" min="0" max="200" value="100" step="5">
+          <span class="value-display" id="tfCloudFlowVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Cloud seed — re-roll the cloud pattern for this world without regenerating the planet.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SEED</span>
+          <input type="range" id="tfCloudSeed" min="0" max="100" value="0" step="1">
+        </div>
+
+        <div class="tf-cat">ATMOSPHERE &amp; ENERGY</div>
+        <div class="input-row" title="Atmosphere height — how far the haze/halo extends out from the surface (the limb thickness).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">A.HEIGHT</span>
+          <input type="range" id="tfAtmo" min="0" max="150" value="100" step="5">
+          <span class="value-display" id="tfAtmoVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Atmosphere density — opacity/thickness of the haze and halo (independent of height). Higher = a denser, more opaque shell.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">A.DENSITY</span>
+          <input type="range" id="tfAtmoDensity" min="0" max="300" value="100" step="5">
+          <span class="value-display" id="tfAtmoDensityVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Aurora strength. 0 disables, 2× doubles. Ribbons drift and morph with the flow field.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">AURORA</span>
+          <input type="range" id="tfAurora" min="0" max="200" value="100" step="5">
+          <span class="value-display" id="tfAuroraVal">1.0×</span>
+        </div>
+        <div class="input-row" style="margin-top:4px;" title="Brown-dwarf emission — how strongly the hot interior glows through cloud rifts.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EMISSION</span>
+          <input type="range" id="tfEmission" min="0" max="200" value="100" step="5">
+          <span class="value-display" id="tfEmissionVal">1.0×</span>
+        </div>
+
+        <div class="tf-cat">GAS &amp; FLOW <span style="color:var(--text-dim);font-weight:normal;">· gas giants / dwarfs</span></div>
+        <div class="input-row" title="Vortex / current-flow strength (~100x range). Shears clouds and gas-giant bands.">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">VORTEX</span>
           <input type="range" id="tfVortex" min="0" max="100" value="50" step="5">
           <span class="value-display" id="tfVortexVal">1.0×</span>
@@ -184,35 +333,25 @@
           <input type="range" id="tfGasDensity" min="0" max="200" value="100" step="5">
           <span class="value-display" id="tfGasDensityVal">1.0×</span>
         </div>
-        <div class="input-row" style="margin-top:4px;" title="Brown-dwarf emission — how strongly the hot interior glows through cloud rifts.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EMISSION</span>
-          <input type="range" id="tfEmission" min="0" max="200" value="100" step="5">
-          <span class="value-display" id="tfEmissionVal">1.0×</span>
+        <div class="input-row" style="margin-top:4px;" title="Gas flow SCALE — swirl / feature size. Higher = finer, more intricate flow structure (gaseous-giganticus noise scale).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SCALE</span>
+          <input type="range" id="tfGasScale" min="0" max="100" value="50" step="5">
+          <span class="value-display" id="tfGasScaleVal">1.0×</span>
         </div>
-        <div class="input-row" style="margin-top:4px;" title="Aurora strength. 0 disables, 2× doubles. Ribbons drift and morph with the flow field.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">AURORA</span>
-          <input type="range" id="tfAurora" min="0" max="200" value="100" step="5">
-          <span class="value-display" id="tfAuroraVal">1.0×</span>
+        <div class="input-row" style="margin-top:4px;" title="Gas TURBULENCE — secondary high-frequency curl that rolls up into Kelvin-Helmholtz billows and chaotic mixing at the band boundaries.">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">TURB</span>
+          <input type="range" id="tfGasTurb" min="0" max="100" value="50" step="5">
+          <span class="value-display" id="tfGasTurbVal">MED</span>
         </div>
-        <div class="input-row" style="margin-top:4px;" title="River visibility — how much of the erosion flow network renders as rivers. 0 hides them.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">RIVERS</span>
-          <input type="range" id="tfRivers" min="0" max="200" value="100" step="5">
-          <span class="value-display" id="tfRiversVal">1.0×</span>
-        </div>
-        <div class="input-row" style="margin-top:4px;" title="Erosion strength — re-carves the terrain and river network from a clean base (releases to apply).">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">EROSION</span>
-          <input type="range" id="tfErosion" min="0" max="200" value="100" step="10">
-          <span class="value-display" id="tfErosionVal">1.0×</span>
+        <div class="input-row" style="margin-top:4px;" title="Gas DETAIL — initial-dye roughness / contrast / filament fineness the flow shears into detail (releases to apply).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">DETAIL</span>
+          <input type="range" id="tfGasDetail" min="0" max="100" value="50" step="5">
+          <span class="value-display" id="tfGasDetailVal">MED</span>
         </div>
         <div class="input-row" style="margin-top:4px;" title="Gas-flow iterations — develops the swirls to this depth on release (more = finer detail). Set CHURN to 0 to freeze the flow at the chosen development.">
           <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">ITER</span>
           <input type="range" id="tfIterations" min="0" max="100" value="16" step="2">
           <span class="value-display" id="tfIterationsVal">400</span>
-        </div>
-        <div class="input-row" style="margin-top:4px;" title="Replace the baked cloud map with animated procedural clouds.">
-          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">CLOUDS</span>
-          <input type="checkbox" id="tfProcClouds">
-          <span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;">PROCEDURAL</span>
         </div>
         <div class="terraform-presets">
           <button id="tfPresetDead" title="No water, no vegetation, thin dusty atmosphere">DEAD</button>
@@ -331,6 +470,27 @@
         </div>
         <button class="primary" id="exportAnim" style="width:100%;margin-top:8px;">EXPORT WORLD ANIM</button>
         <div id="animProgress" style="font-size:9px;color:var(--text-dim);margin-top:4px;letter-spacing:1px;min-height:11px;"></div>
+      </div>
+
+      <div class="section" id="mapExportSection">
+        <div class="section-label">EXPORT MAP</div>
+        <div style="font-size:9px;color:var(--text-dim);letter-spacing:0.5px;margin-bottom:5px;line-height:1.4;">Equirectangular layers → transparent PNG. Enable one for isolation, or several to combine.</div>
+        <div class="input-row" title="Bare terrain: rock, sand, coast — vegetation and snow excluded."><input type="checkbox" id="mapGround" checked><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">GROUND</span></div>
+        <div class="input-row" style="margin-top:3px;" title="Vegetation overlay (green biomes) on alpha."><input type="checkbox" id="mapVeg" checked><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">VEGETATION</span></div>
+        <div class="input-row" style="margin-top:3px;" title="Polar ice sheets + mountain snowcaps on alpha."><input type="checkbox" id="mapSnow" checked><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">SNOW / ICE</span></div>
+        <div class="input-row" style="margin-top:3px;" title="Oceans and rivers together on alpha."><input type="checkbox" id="mapWater" checked><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">RIVERS + OCEANS</span></div>
+        <div class="input-row" style="margin-top:3px;" title="Cloud coverage on alpha."><input type="checkbox" id="mapClouds"><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">CLOUDS</span></div>
+        <div class="input-row" style="margin-top:6px;" title="Output a white-on-transparent coverage matte instead of colour (flatten on black for a classic mask)."><input type="checkbox" id="mapMask"><span style="font-size:9px;color:var(--text-dim);letter-spacing:1px;margin-left:4px;">MASK (white on black)</span></div>
+        <div class="input-row" style="margin-top:6px;" title="Output width. Height is auto (width ÷ 2).">
+          <span style="font-size:9px;color:var(--text-dim);width:50px;letter-spacing:1px;">SIZE</span>
+          <select id="mapRes" style="flex:1;">
+            <option value="1024">1024 px</option>
+            <option value="2048" selected>2048 px</option>
+            <option value="4096">4096 px</option>
+          </select>
+        </div>
+        <button class="primary" id="exportMap" style="width:100%;margin-top:8px;">EXPORT MAP</button>
+        <div id="mapProgress" style="font-size:9px;color:var(--text-dim);margin-top:4px;letter-spacing:1px;min-height:11px;"></div>
       </div>
     </aside>
   </div>
