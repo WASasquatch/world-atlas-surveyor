@@ -11,6 +11,7 @@ import { Renderer } from '../renderer.js';
 import { GLRenderer } from '../gl/gl-renderer.js';
 import { EASTER_EGGS } from '../data/easter-eggs.js';
 import { EARTH_MASK, decodeEarthMask } from '../data/earth-mask.js';
+import { decodeEarthHeight } from '../data/earth-height.js';
 import { decodeCloudRef } from '../data/cloud-ref.js';
 import { els } from './dom.js';
 import { randomDesignation, sizeLabel } from './format.js';
@@ -355,11 +356,12 @@ els.planetCanvas.classList.toggle('hidden', renderer === glRenderer);
 els.planetGLCanvas.classList.toggle('hidden', renderer !== glRenderer);
 updateSunFromUI();
 fitRenderer();
-// Decode embedded reference assets (Earth water mask + cloud pattern) in
-// parallel before the initial render. Both are optional — if either fails
-// (very old browser without DecompressionStream, etc.) we still render.
-Promise.all([decodeEarthMask(), decodeCloudRef()]).then(([earthOk]) => {
-  if (!earthOk) {
+// Decode reference assets in parallel before the initial render. All optional —
+// if they fail (old browser without DecompressionStream, missing height PNG,
+// etc.) we still render. The Earth preset prefers the off-disk GEBCO height map
+// and falls back to the embedded 1-bit water mask.
+Promise.all([decodeEarthHeight(), decodeEarthMask(), decodeCloudRef()]).then(([heightOk, maskOk]) => {
+  if (!heightOk && !maskOk) {
     els.seed.value = randomDesignation();
   }
   generate();

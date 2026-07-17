@@ -10,7 +10,7 @@
 // +z toward viewer; view ray -> tilt (X) -> spin (Y) -> planet frame;
 // u = lon/2pi + 0.5, v = lat/pi + 0.5; all maps 768x384 equirect.
 
-import { SIMPLEX_3D, SIMPLEX_4D, FBM_4D, SPHERE_FLOW, WORLEY_3D } from './noise-glsl.js';
+import { SIMPLEX_3D, SIMPLEX_4D, FBM_4D, WORLEY_3D } from './noise-glsl.js';
 
 const PLANET_VERT = /* glsl */ `
 in vec3 position;
@@ -133,7 +133,6 @@ uniform vec3 uPalDeepWater, uPalWater, uPalShore, uPalBeach, uPalLowland,
 ${SIMPLEX_3D}
 ${SIMPLEX_4D}
 ${FBM_4D}
-${SPHERE_FLOW}
 ${WORLEY_3D}
 
 const float PI = 3.14159265358979;
@@ -409,17 +408,18 @@ vec3 classifyRocky(float h, float m, float lat, vec3 w, float slope, out float i
 }
 
 // ============================================================================
-// CLOUD SYSTEM — multi-deck, multi-scale, volumetrically shaded.
-// Three physically-inspired decks, each on its own shell altitude (parallax +
-// shadow scale with height):
-//   0 LOW  — cumulus / stratocumulus: puffy (billow noise), cellular, broken, opaque
-//   1 MID  — alto / frontal banks: medium fbm banks, moderate coverage
+// CLOUD SYSTEM — volumetric, multi-deck, height-displaced.
+// Three altitude decks share one marched shell so clouds read as VOLUME (soft
+// tops, self-shadowed bases, towering cumulus) rather than a flat clipped decal:
+//   0 LOW  — cumulus / stratocumulus: perlin + voronoi BILLOW, cellular, towering
+//   1 MID  — alto / frontal banks: perlin-billow banks, moderate coverage
 //   2 HIGH — cirrus: latitudinally-stretched wispy streaks, thin/translucent
-// Every deck: flow-advected (polar-tapered so no pole spiral), multi-octave
-// shape, weather-band coverage (ITCZ wet / subtropics dry / mid-lat storm belt),
-// and value-driven multi-scale breakup (solid cores → cellular stipple at edges).
-// Shaded with a density-gradient normal (sun puffiness), a short sun-march
-// self-shadow (Beer), a powder dark-edge term, and forward scatter (silver lining).
+// Each deck's COLUMN height is a CONTINUOUS field (no hard threshold) built from
+// low-freq perlin coverage, perlin billow (puffy bodies) and Worley erosion
+// (voronoi cauliflower edges). A short vertical raymarch then integrates the
+// three decks' vertical profiles with Beer self-shadowing, so height reads as
+// tone: bright sunlit tops fading to shadowed bases, tall cumulus where dense.
+// Flow-advected (polar-tapered so no pole spiral) with per-deck weather bands.
 // ============================================================================
 
 // latitude weather bands: +ITCZ (equator) −subtropical highs (~25°) +storm belt
@@ -431,21 +431,44 @@ float cloudLatBias(float aLat) {
        + 0.13 * exp(-(aLat - 0.58) * (aLat - 0.58) / 0.060);
 }
 
+// Cheap curl-noise flow for clouds. Same idea as the gas-giant sphereFlow
+// (gradient of a noise field, projected onto the tangent plane, rotated 90°
+// about the radial axis → divergence-free swirl) PLUS a zonal-band term — but
+// built from a single snoise3 gradient instead of a 6-octave 4D fBm gradient.
+// That matters for COMPILE time: the full sphereFlow unrolls to ~36 snoise4 per
+// step, and warping every cloud deck with it made the D3D/ANGLE shader compiler
+// take ~100 s (a browser lock-up). At the small default warp strengths the extra
+// octaves were barely visible anyway; this keeps the swirl + banding for a
+// fraction of the compiled instruction count.
+vec3 cloudFlowVec(vec3 n, float scale, float phase, float bands, float bandAmp) {
+  vec3 p = n * scale + phase;
+  float e = 0.35;
+  vec3 g = vec3(
+    snoise3(p + vec3(e, 0.0, 0.0)) - snoise3(p - vec3(e, 0.0, 0.0)),
+    snoise3(p + vec3(0.0, e, 0.0)) - snoise3(p - vec3(0.0, e, 0.0)),
+    snoise3(p + vec3(0.0, 0.0, e)) - snoise3(p - vec3(0.0, 0.0, e)));
+  vec3 v = cross(n, g - n * dot(g, n)) * 1.5;   // curl (tangential, divergence-free)
+  if (bands > 0.0) {
+    float lat = asin(clamp(n.y, -1.0, 1.0));
+    vec3 east = vec3(-n.z, 0.0, n.x);
+    float m = length(east);
+    if (m > 1e-5) {
+      float cb = cos(lat * bands);
+      float env = 0.45 + 0.55 * cos(lat);
+      v += (east / m) * (env * sign(cb) * abs(cb) * bandAmp);
+    }
+  }
+  return v;
+}
+
 // polar-tapered flow advection. 'bands' sets the zonal-jet count and 'phase'
-// offsets the flow clock per deck, so the three decks DON'T all band identically
-// (low = few broad bands, mid = more/tighter, high = a couple of wide streams).
+// offsets the flow clock per deck, so the three decks DON'T all band identically.
 vec3 cloudWarp(vec3 dir, float strength, float bands, float phase, float scale) {
   float taper = 1.0 - smoothstep(0.70, 0.96, abs(dir.y));
   float perStep = strength * taper;
   if (perStep > 0.001) {
-    int steps = max(3, uQCloudWarp * 2);
-    for (int i = 0; i < 8; i++) {
-      if (i >= steps) break;
-      // curl-dominant, weak zonal banding: terrestrial weather swirls into
-      // frontal systems / storms, it does NOT stripe into gas-giant jets. (Gas
-      // giants get their strong bands from the separate flow sim.) curlAmp 1.5,
-      // bandAmp 0.55 — was 1.0 / 1.7, which read as rigid horizontal banding.
-      vec3 f = sphereFlow(dir, scale, uFlowTime + phase, uQCloudOct, 0.5, 1.5, bands, 0.55, 0.55, 1.0);
+    for (int i = 0; i < 2; i++) {   // two cheap advection steps
+      vec3 f = cloudFlowVec(dir, scale, uFlowTime + phase + float(i) * 4.1, bands, 0.55);
       dir = normalize(dir - f * perStep);
     }
   }
@@ -474,58 +497,65 @@ vec3 cloudDeckDir(vec3 w, int deck) {
   return vec3(ca * dir.x - sa * dir.z, dir.y, sa * dir.x + ca * dir.z);
 }
 
-// full deck coverage at a cloud-space direction (no warp — caller warps once)
-float cloudDeckCover(vec3 cdir, int deck) {
+// Continuous cloud COLUMN height/potential (0..1) at a cloud-space direction
+// (caller warps once). NOT hard-thresholded — the soft, wide coverage ramp is
+// what lets the vertical march carve VOLUME out of it instead of stamping a flat
+// decal. Structure = low-freq perlin coverage, perlin billow (puffy cauliflower
+// bodies), and Worley erosion (voronoi cellular edges) on the two lower decks.
+float cloudColumn(vec3 cdir, int deck) {
   float freq; int oct; float billow; vec3 stretch; float flow; float covBias; float seed;
   cloudDeckCfg(deck, freq, oct, billow, stretch, flow, covBias, seed);
   float t = uFlowTime;
   float aLat = abs(cdir.y);
   vec3 p = cdir * stretch * freq + seed;
-  float f = fbm4(vec4(p, t * 0.10 + seed), oct, 0.56) * 0.5 + 0.5;
-  float shape = f;
+
+  float fb = fbm4(vec4(p, t * 0.10 + seed), oct, 0.56) * 0.5 + 0.5;
+  // perlin BILLOW — |fbm| makes rounded puffy lobes (dense interiors, thin dark
+  // creases along the zero-crossings between them), the cauliflower cumulus look.
+  // Must be abs(), NOT 1-abs(): 1-abs() is RIDGED noise, which inverts it into
+  // bright meandering ridge-lines around hollow centres. Mixed in BEFORE the
+  // coverage ramp so the shape survives instead of washing out to haze.
   if (billow > 0.01) {
-    float b = 1.0 - abs(fbm4(vec4(p * 1.7 + 11.0, t * 0.13), max(3, oct - 2), 0.55));  // puffy tops
-    shape = mix(f, clamp(f * b * 1.35, 0.0, 1.0), billow);
+    float bil = abs(fbm4(vec4(p * 1.9 + 11.0, t * 0.13), max(3, oct - 1), 0.55));
+    fb = mix(fb, clamp(fb * 0.45 + bil * 0.72, 0.0, 1.0), billow);
   }
-  float sys = fbm4(vec4(cdir * 1.2 + seed + 40.0, t * 0.04), 3, 0.5) * 0.5 + 0.5;     // weather systems
+  // broad weather systems — coherent cloudy vs. clear regions
+  float sys = fbm4(vec4(cdir * 1.2 + seed + 40.0, t * 0.04), 3, 0.5) * 0.5 + 0.5;
   float cov = clamp(uCloudCover + covBias + cloudLatBias(aLat) + (sys - 0.5) * 0.55, 0.0, 1.0);
-  float thr = mix(0.92, 0.22, cov);
-  float density = smoothstep(thr, thr + 0.20, shape);
-  // value-driven multi-scale breakup (solid cores, cellular stipple at edges)
-  float amt = smoothstep(0.72, 0.14, density);
-  if (amt > 0.01) {
-    float cellN = fbm4(vec4(cdir * 7.0 + seed + 80.0, t * 0.2), 3, 0.55) * 0.55
-                + fbm4(vec4(cdir * 20.0 + seed + 100.0, t * 0.4), 3, 0.6) * 0.30
-                + fbm4(vec4(cdir * 42.0 + seed + 120.0, t * 0.6), 2, 0.62) * 0.15;   // tiny/near-pixel
-    cellN = cellN * 0.5 + 0.5;
-    float cells = mix(0.28, 1.0, smoothstep(0.32, 0.62, cellN));
-    density *= mix(1.0, cells, amt);
+  // SOFT coverage remap — a WIDE band (vs. the old 0.20 clip) leaves a graded
+  // shoulder the march turns into rounded volume rather than a clipped rim.
+  float lo = 1.0 - cov;
+  float h = smoothstep(lo, min(lo + 0.55, 1.0), fb);
+
+  // VORONOI billow erosion — Worley border-distance (1 at cell centres) eats the
+  // thin edges into stacked cauliflower cells while leaving solid cores intact.
+  // LOW deck / one tap only: each worley call unrolls a 27-cell loop, so extra
+  // taps bloat the compiled shader. One on the cumulus deck carries the look.
+  if (deck == 0 && h > 0.001) {
+    float edge = 1.0 - smoothstep(0.0, 0.55, h);
+    float wb = 1.0 - worley3(cdir * (freq * 2.4) + seed + 300.0);
+    h *= mix(1.0, clamp(wb * 1.3, 0.0, 1.0), edge * 0.85);
   }
-  // fair-weather cumulus SPECKS — tiny isolated puffs (~1–5 px from orbit) that
-  // stipple the clearer fair-weather zones (the "prairie sky" dotting). Only on
-  // the LOW deck, clustered by a low-freq mask, and only where the main deck is
-  // thin so they populate open sky rather than piling onto solid banks. Two very
-  // high frequencies AND-ed → sparse, small, size-varied dots.
-  if (deck == 0) {
-    float fair = fbm4(vec4(cdir * 1.7 + seed + 200.0, t * 0.05), 2, 0.5) * 0.5 + 0.5;
-    float fairCov = clamp(uCloudCover + cloudLatBias(aLat), 0.0, 1.0);
-    float s1 = fbm4(vec4(cdir * 26.0 + seed + 210.0, t * 0.30), 2, 0.60) * 0.5 + 0.5;
-    float s2 = fbm4(vec4(cdir * 52.0 + seed + 230.0, t * 0.45), 2, 0.62) * 0.5 + 0.5;
-    float specks = smoothstep(0.60, 0.72, s1) * smoothstep(0.58, 0.74, s2);
-    specks *= smoothstep(0.30, 0.62, fair) * smoothstep(0.10, 0.45, fairCov) * (1.0 - density);
-    density = max(density, specks * 0.85);
-  }
-  return clamp(density, 0.0, 1.0);
+
+  return clamp(h, 0.0, 1.0);
 }
 
-// cheap shape-only coverage for gradient/shadow taps (no billow/sys/breakup)
-float cloudDeckCheap(vec3 cdir, int deck) {
+// cheap column (no billow / worley / specks) for density-gradient shading taps
+float cloudColumnCheap(vec3 cdir, int deck) {
   float freq; int oct; float billow; vec3 stretch; float flow; float covBias; float seed;
   cloudDeckCfg(deck, freq, oct, billow, stretch, flow, covBias, seed);
-  float f = fbm4(vec4(cdir * stretch * freq + seed, uFlowTime * 0.10 + seed), max(3, oct - 2), 0.56) * 0.5 + 0.5;
+  float fb = fbm4(vec4(cdir * stretch * freq + seed, uFlowTime * 0.10 + seed), max(3, oct - 2), 0.56) * 0.5 + 0.5;
   float cov = clamp(uCloudCover + covBias + cloudLatBias(abs(cdir.y)), 0.0, 1.0);
-  float thr = mix(0.92, 0.22, cov);
-  return smoothstep(thr, thr + 0.20, f);
+  return smoothstep(1.0 - cov, min(1.0 - cov + 0.55, 1.0), fb);
+}
+
+// vertical density profile of a deck within the normalized shell (u in [0,1]):
+// soft rounded base, dense middle, tapered/eroded top (anvil). 'top' is pushed
+// up by the column height so denser columns tower higher.
+float bandProfile(float u, float base, float top) {
+  if (u <= base || u >= top) return 0.0;
+  float t = (u - base) / max(top - base, 1e-4);
+  return smoothstep(0.0, 0.14, t) * (1.0 - smoothstep(0.5, 1.0, t));
 }
 
 void main() {
@@ -573,7 +603,9 @@ void main() {
       if (uRiverStyle < 0.5) {
         float absLatR = abs(lat) * 0.63661977;
         float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
-        float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
+        // fade rivers INTO the ice (see live-view block for rationale)
+        float coldFade = clamp(max(smoothstep(0.10, 0.55, iceCover),
+                                   smoothstep(uIceLine - 0.02, uIceLine + 0.16, climate)), 0.0, 1.0);
         riverT *= (1.0 - coldFade);
       }
       if (riverT > 0.001) {
@@ -731,7 +763,12 @@ void main() {
     if (uRiverStyle < 0.5) {
       float absLatR = abs(lat) * 0.63661977;   // /(PI/2)
       float climate = absLatR + max(h - uSeaLevel, 0.0) * 0.85;
-      float coldFade = clamp(max(iceCover, smoothstep(uIceLine - 0.20, uIceLine + 0.02, climate)), 0.0, 1.0);
+      // Rivers run INTO the ice and dwindle there, rather than dying out in the
+      // temperate zone ahead of it: fade primarily by actual ice coverage (kept
+      // ~full until ice appears, gone once it thickens), with a climate backstop
+      // anchored AT the ice line so hard-edged sheets still get a gradient.
+      float coldFade = clamp(max(smoothstep(0.10, 0.55, iceCover),
+                                 smoothstep(uIceLine - 0.02, uIceLine + 0.16, climate)), 0.0, 1.0);
       riverT *= (1.0 - coldFade);
     }
     if (riverT > 0.001) {
@@ -777,58 +814,73 @@ void main() {
     c = albedo * lit;
   }
 
-  // ---- clouds (multi-deck, volumetric) ----
+  // ---- clouds (volumetric, height-displaced multi-deck) ----
+  // Kept deliberately FLAT (one shared warp, one shared gradient normal, decks
+  // inlined as scalars, single noise-free march): the per-deck warp/gradient
+  // version tripled the shader's most expensive term (curl-noise flow) and made
+  // the D3D/ANGLE shader compiler take ~100 s — a browser lock-up on first load.
   if (uHasClouds > 0.5) {
     vec3 lC = viewToPlanet(l);                       // sun direction in planet/cloud space
     float ambient = 0.34 + 0.16 * uSunFalloff;
     vec3 ashTint = uCloudColor;
     if (uHasAsh > 0.5) { float ash = texture(uAshTex, vec2(fract(uv.x + uCloudShift), uv.y)).r; if (ash > 0.02) ashTint = mix(uCloudColor, uAshCloud, min(ash, 1.0)); }
-    // ground shadow cast by the LOW deck (sampled offset toward the sun), applied
-    // before the decks so it darkens the surface but not the clouds themselves
-    if (light > 0.05 && uCloudAmtLow > 0.002) {
-      vec3 nS = normalize(vec3(n.xy / (1.0 + uCloudAltLow), n.z));
-      vec3 sw = viewToPlanet(normalize(nS + l * (0.05 + uCloudAltLow * 1.5)));
-      float shc = cloudDeckCover(cloudDeckDir(sw, 0), 0) * uCloudAmtLow;
-      c *= 1.0 - shc * 0.32 * light;
-    }
-    // composite decks bottom → top: LOW (opaque cumulus) → MID → HIGH (thin cirrus)
-    for (int deck = 0; deck < 3; deck++) {
-      float amt = (deck == 0) ? uCloudAmtLow : (deck == 1) ? uCloudAmtMid : uCloudAmtHigh;
-      if (amt <= 0.002) continue;
-      float alt = (deck == 0) ? uCloudAltLow : (deck == 1) ? uCloudAltMid : uCloudAltHigh;
-      vec3 nD = normalize(vec3(n.xy / (1.0 + alt), n.z));    // per-deck parallax shell
-      vec3 cdir = cloudDeckDir(viewToPlanet(nD), deck);
-      float d = cloudDeckCover(cdir, deck) * amt * uCloudMul;
-      if (d <= 0.01) continue;
-      // density-gradient normal → sun puffiness (cheap shape taps)
+
+    float amt0 = uCloudAmtLow, amt1 = uCloudAmtMid, amt2 = uCloudAmtHigh;
+    // ONE shared flow-warp for all three decks; cloudColumn still applies each
+    // deck's own frequency/stretch/billow, so the decks stay visually distinct.
+    vec3 cdir = cloudDeckDir(viewToPlanet(normalize(vec3(n.xy / (1.0 + uCloudAltMid), n.z))), 0);
+
+    // ground shadow cast by the LOW deck
+    if (light > 0.05 && amt0 > 0.002) c *= 1.0 - cloudColumnCheap(cdir, 0) * amt0 * 0.32 * light;
+
+    float H0 = amt0 > 0.002 ? cloudColumn(cdir, 0) : 0.0;
+    float H1 = amt1 > 0.002 ? cloudColumn(cdir, 1) : 0.0;
+    float H2 = amt2 > 0.002 ? cloudColumn(cdir, 2) : 0.0;
+    float anyCloud = max(max(H0 * amt0, H1 * amt1), H2 * amt2);
+
+    if (anyCloud > 0.004) {
+      // ONE shared density-gradient normal → sun puffiness (3 cheap taps, not 9)
       vec3 tX = normalize(cross(vec3(0.0, 1.0, 0.0), cdir) + vec3(1e-4, 0.0, 0.0));
       vec3 tY = cross(cdir, tX);
-      float eps = (deck == 2) ? 0.04 : 0.022;
-      float c0 = cloudDeckCheap(cdir, deck);
-      float gx = cloudDeckCheap(normalize(cdir + tX * eps), deck) - c0;
-      float gy = cloudDeckCheap(normalize(cdir + tY * eps), deck) - c0;
-      float bumpK = (deck == 2) ? 3.0 : 8.0;                 // cirrus flatter than cumulus
-      vec3 cn = normalize(cdir - (tX * gx + tY * gy) * bumpK);
+      float c0 = cloudColumnCheap(cdir, 0);
+      float gx = cloudColumnCheap(normalize(cdir + tX * 0.024), 0) - c0;
+      float gy = cloudColumnCheap(normalize(cdir + tY * 0.024), 0) - c0;
+      vec3 cn = normalize(cdir - (tX * gx + tY * gy) * 8.0);
       float sunLit = clamp(dot(cn, lC) * 0.7 + 0.35, 0.0, 1.0);
-      // self-shadow (Beer) — short march toward the sun; low deck is thickest
-      float sh = cloudDeckCheap(normalize(cdir + lC * 0.03), deck)
-               + cloudDeckCheap(normalize(cdir + lC * 0.07), deck) * 0.6;
-      float trans = exp(-sh * ((deck == 0) ? 2.2 : 1.2));
-      float powder = 1.0 - exp(-d * 3.5);                    // dark-edge powder
-      // FORWARD SCATTER — the SCATTER slider multiplies the sunward lit term so
-      // sun-facing cloud brightens toward a hot silver, plus a terminator rim
-      // lift (silver lining). Scatter 0 = flat lit; higher = strong glow.
       float fwd = pow(clamp(dot(cn, lC), 0.0, 1.0), 3.0);
-      float scatBoost = 1.0 + uCloudScatter * (1.4 * fwd + 0.5 * pow(1.0 - light, 2.0));
-      vec3 sunTerm = uSunColor * (sunLit * trans * scatBoost);
-      // dark-side PENUMBRA: the planet blocks sunlight, so clouds fall into
-      // shadow past the terminator along a soft curve. Higher decks catch light
-      // a little further round the limb (altitude → later sunset), and a thin
-      // starlit floor keeps night clouds barely visible rather than pure black.
-      float cloudDay = smoothstep(-0.26, 0.12, ndotl + alt * 0.7);
-      float dayAmb = mix(0.045, ambient, cloudDay);
-      vec3 shade = ashTint * (dayAmb + sunTerm * light * 1.15);
-      c = mix(c, clamp(shade, 0.0, 3.0), clamp(d * mix(0.8, 1.0, powder), 0.0, 1.0));
+      float scat = 1.0 + uCloudScatter * (1.4 * fwd + 0.5 * pow(1.0 - light, 2.0));
+      float cloudDay = smoothstep(-0.26, 0.12, ndotl + uCloudAltMid * 0.7);
+
+      // LOW towers rise with density; MID/HIGH sit in fixed shell bands. Short
+      // front→back (top→surface) march; Beer self-shadow from the cloud ABOVE
+      // each sample makes tops bright and bases dark — that gradient IS the volume.
+      float top0 = 0.16 + 0.55 * H0;
+      int STEPS = 8 + uQCloudOct * 2;                      // 12 (low) .. 16 (ultra)
+      float du = 1.0 / float(STEPS);
+      float T = 1.0; vec3 Lsum = vec3(0.0); float odAbove = 0.0;
+      float ext = 6.5 * max(uCloudMul, 0.0);
+      for (int i = 0; i < 24; i++) {
+        if (i >= STEPS) break;
+        float u = 1.0 - (float(i) + 0.5) * du;
+        float dens = bandProfile(u, 0.0, top0) * H0 * amt0
+                   + bandProfile(u, 0.32, 0.62) * H1 * amt1
+                   + bandProfile(u, 0.68, 1.0) * H2 * amt2;
+        if (dens > 0.0008) {
+          float od = dens * du * ext;
+          float shadow = exp(-odAbove * ext * 0.55);        // Beer self-shadow from above
+          // ambient is occluded by overlying cloud too, so shadowed bases sink
+          // darker than sunlit tops — that deepened gradient reads as volume.
+          float dayAmb = mix(0.045, ambient, cloudDay) * mix(0.5, 1.0, shadow);
+          vec3 sunTerm = uSunColor * (sunLit * scat * shadow * light * 1.15);
+          float powder = 1.0 - exp(-dens * du * 8.0);       // dark-edge powder
+          float a = 1.0 - exp(-od);
+          Lsum += T * (ashTint * (dayAmb + sunTerm)) * a * mix(0.75, 1.0, powder);
+          T *= 1.0 - a;
+        }
+        odAbove += dens * du;
+        if (T < 0.02) break;
+      }
+      c = c * T + clamp(Lsum, 0.0, 4.0);
     }
   }
 

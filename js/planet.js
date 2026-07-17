@@ -13,6 +13,7 @@ import { erodeMultiRes } from './erosion.js';
 import { PALETTES } from './data/palettes.js';
 import { pickPalette } from './data/variants.js';
 import { EARTH_MASK, EARTH_MASK_W } from './data/earth-mask.js';
+import { EARTH_HEIGHT, sampleEarthHeight, earthSeaGray } from './data/earth-height.js';
 import { CLOUD_REF, sampleCloudRef } from './data/cloud-ref.js';
 
 // ---------- PLANET ----------
@@ -468,32 +469,38 @@ class Planet {
           h += this.applyCraters(x, y, z, craters);
         }
 
-        // Earth-mode bias — push h above/below seaLevel based on the
-        // real water mask while preserving Perlin detail for coastline
-        // shape, mountain ranges, and seafloor variation.
-        if (this.earthMode && EARTH_MASK) {
-          // Texture coords (i,j) align 1:1 with mask coords since both are
-          // equirectangular at 768x384. We mirror i because the renderer's
-          // longitude convention runs the opposite direction from the source
-          // PNG (otherwise N. America ends up where Asia should be).
+        // Earth-mode bias — real GEBCO elevation (bilinear-sampled off disk)
+        // drives continents / ranges / ocean depth; the Perlin `h` is demoted to
+        // fine roughness on top. Bilinear sampling means it auto-scales to any
+        // MAP RES. Falls back to the embedded 1-bit water mask if the height map
+        // isn't loaded (missing PNG / old browser).
+        if (this.earthMode && EARTH_HEIGHT) {
+          // Mirror longitude (renderer convention runs opposite the source map,
+          // as with the legacy mask) and read north-up latitude.
+          const sea = earthSeaGray();
+          const u = 1.0 - (i + 0.5) / W;
+          const v = (j + 0.5) / H;
+          const rel = sampleEarthHeight(u, v) - sea;   // >0 land, <0 ocean
+          const detail = h;                            // Perlin roughness
+          if (rel >= 0.0) {
+            const above = rel / Math.max(1.0 - sea, 1e-3);   // 0..1 across land range
+            // real elevation + a little Perlin crag; floored so coasts never flood
+            h = cfg.seaLevel + Math.max(above * 0.85 + detail * 0.10, 0.012);
+          } else {
+            const below = (-rel) / Math.max(sea, 1e-3);      // 0..1 across ocean range
+            h = cfg.seaLevel - below * 0.42 + detail * 0.06;
+          }
+        } else if (this.earthMode && EARTH_MASK) {
+          // Fallback: 1-bit land/water mask (768x384). Mirror i for the same
+          // longitude reason; push land above / ocean below sea level.
           const flipI = (EARTH_MASK_W - 1 - i);
           const isLand = EARTH_MASK[j * EARTH_MASK_W + flipI];
-          const baseAbove = 0.14;  // mean elevation above seaLevel for land
-          const baseBelow = 0.20;  // mean depth below seaLevel for ocean
-          // Land relief was compressed (0.45) -> flat mountains. Give land a
-          // wider elevation range so ranges/valleys read in relief; keep the
-          // ocean floor gentler.
+          const baseAbove = 0.14, baseBelow = 0.20;
           const landScale = 1.05, oceanScale = 0.5;
           if (isLand) {
-            const detail = h * landScale + baseAbove;
-            // EARTH continents must never flood: deep Perlin troughs / mountain
-            // -valley subtraction can drive detail below 0, which would punch
-            // ocean holes into the landmasses. Floor it to a thin coastal band
-            // so the real continents stay intact while keeping upland relief.
-            h = cfg.seaLevel + Math.max(detail, 0.012);
+            h = cfg.seaLevel + Math.max(h * landScale + baseAbove, 0.012);
           } else {
-            const detail = h * oceanScale - baseBelow;
-            h = cfg.seaLevel + detail;
+            h = cfg.seaLevel + (h * oceanScale - baseBelow);
           }
         }
 

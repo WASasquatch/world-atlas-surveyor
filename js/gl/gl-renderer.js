@@ -62,6 +62,7 @@ uniform sampler2D uScene;
 uniform sampler2D uBloom;
 uniform float uBloomStrength;
 uniform float uChroma;      // chromatic aberration (radial RGB split)
+uniform float uAspect;      // internalW / internalH — keeps the split circular
 uniform float uGrain;       // film grain amount
 uniform float uGrainTime;   // animated grain offset
 void main() {
@@ -70,11 +71,23 @@ void main() {
   vec4 sRaw = texture(uScene, uv);
   vec3 s;
   if (uChroma > 0.0001) {
-    // lens chromatic aberration — split R/B radially, growing toward the limb
-    float amt = uChroma * 0.03 * dot(fromC, fromC);
-    s.r = texture(uScene, uv - fromC * amt).r;
+    // Radial lens chromatic aberration. Aspect-correct the offset so the split is
+    // circular around the centred disc (an un-corrected uv-0.5 squishes the split
+    // to near-zero on the left/right limbs of a wide viewport, leaving only a
+    // top/bottom rim fringe). A baseline term keeps it visible across the whole
+    // planet; the radial term intensifies it toward the limb like real glass.
+    vec2 dp = vec2(fromC.x * uAspect, fromC.y);  // height-proportional radial vector
+    float L = length(dp);
+    float r = clamp(L * 2.0, 0.0, 1.5);          // 0 at centre → ~1 at the limb
+    vec2 dir = L > 1e-4 ? dp / L : vec2(0.0);     // unit radial dir in pixel space
+    // shift as a fraction of screen HEIGHT (resolution-independent). Small baseline
+    // so the split is visible across the whole disc; grows toward the limb. Tuned
+    // so full strength reads as a heavy-but-coherent lens, not a prism.
+    float amt = uChroma * (0.0012 + 0.0075 * r);
+    vec2 off = vec2(dir.x / uAspect, dir.y) * amt; // → uv, equal pixel shift both axes
+    s.r = texture(uScene, uv - off).r;
     s.g = sRaw.g;
-    s.b = texture(uScene, uv + fromC * amt).b;
+    s.b = texture(uScene, uv + off).b;
   } else { s = sRaw.rgb; }
   vec3 bloom = texture(uBloom, uv).rgb * uBloomStrength;
   vec3 c = s + bloom;
@@ -294,7 +307,7 @@ class GLRenderer {
       uSrc: { value: null }, uDir: { value: new THREE.Vector2() },
     });
     this.compositeMat = mkMat(COMPOSITE_FRAG, {
-      uScene: { value: null }, uBloom: { value: null }, uBloomStrength: { value: 0.55 },
+      uScene: { value: null }, uBloom: { value: null }, uBloomStrength: { value: 0.55 }, uAspect: { value: 1 },
       uChroma: { value: 0 }, uGrain: { value: 0 }, uGrainTime: { value: 0 },
     });
     // post-FX intensities (user-controlled). bloom is the strength multiplier.
@@ -718,6 +731,7 @@ class GLRenderer {
     cu.uBloom.value = this.bloomEnabled ? this.bloomA.texture : this.emptyTex;
     cu.uBloomStrength.value = this.bloomEnabled ? this.postFX.bloom : 0.0;
     cu.uChroma.value = this.postFX.chroma;
+    cu.uAspect.value = this.internalH > 0 ? this.internalW / this.internalH : 1.0;
     cu.uGrain.value = this.postFX.grain;
     // advance grain unless capturing (frozen for seamless loop exports)
     if (!this.capturing) cu.uGrainTime.value = (cu.uGrainTime.value + 1.0) % 1000.0;
