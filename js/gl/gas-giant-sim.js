@@ -16,33 +16,16 @@
 import * as THREE from '../vendor/three.module.min.js';
 import { mulberry32 } from '../core/prng.js';
 import { SIMPLEX_3D, SIMPLEX_4D, FBM_4D, SPHERE_FLOW } from './noise-glsl.js';
+import {
+  EQUIRECT_PROJ as EQUIRECT_COMMON, advectFrag, sharpenFrag, makeRT, makeQuadMat,
+} from './flow-common.js';
 
 const SIM_W = 512, SIM_H = 256;
 
-const QUAD_VERT = /* glsl */ `
-in vec3 position;
-in vec2 uv;
-out vec2 vUv;
-void main() {
-  vUv = uv;
-  gl_Position = vec4(position.xy, 0.0, 1.0);
-}
-`;
-
-const EQUIRECT_COMMON = /* glsl */ `
-const float PI = 3.14159265358979;
-vec3 uvToDir(vec2 uv) {
-  float lon = (uv.x - 0.5) * 2.0 * PI;
-  float lat = (uv.y - 0.5) * PI;
-  float cl = cos(lat);
-  return vec3(cl * cos(lon), sin(lat), cl * sin(lon));
-}
-vec2 dirToUv(vec3 d) {
-  float lat = asin(clamp(d.y, -1.0, 1.0));
-  float lon = atan(d.z, d.x);
-  return vec2(lon / (2.0 * PI) + 0.5, lat / PI + 0.5);
-}
-`;
+// advection + sharpening are shared with the aurora sim (see flow-common.js);
+// only the velocity and initial-dye passes below are gas-giant specific.
+const ADVECT_FRAG = advectFrag(EQUIRECT_COMMON);
+const SHARPEN_FRAG = sharpenFrag(EQUIRECT_COMMON);
 
 // Pass 1 — velocity field: tangential flow vector per equirect texel.
 const VELOCITY_FRAG = /* glsl */ `
@@ -134,81 +117,6 @@ void main() {
   float spot = smoothstep(0.70, 0.86, spotN);
   col = mix(col, col * vec3(1.18, 0.92, 0.72), spot * (0.35 + 0.35 * uDetail));
   outColor = vec4(col, 1.0);
-}
-`;
-
-// Pass 3 — advection: backtrace along the velocity field and resample,
-// with a slight pull back toward the initial dye to keep band identity
-// (particles in the original never lose their color; bilinear advection
-// diffuses, so the injection counteracts wash-out).
-const ADVECT_FRAG = /* glsl */ `
-precision highp float;
-in vec2 vUv;
-out vec4 outColor;
-uniform sampler2D uDye;
-uniform sampler2D uInitDye;
-uniform sampler2D uVelocity;
-uniform vec2 uTexel;
-uniform float uDt;
-uniform float uInject;
-${EQUIRECT_COMMON}
-vec3 dye(vec2 uv) { return texture(uDye, uv).rgb; }
-void main() {
-  vec3 dir = uvToDir(vUv);
-  vec3 vel = texture(uVelocity, vUv).xyz;
-  // semi-Lagrangian backtrace
-  vec3 bpos = normalize(dir - vel * uDt);
-  vec2 buv = dirToUv(bpos);
-  vec3 phiHat = dye(buv);
-  // MacCormack correction: re-advect forward, estimate + halve the error.
-  // This is 2nd-order and barely diffusive, so swirls stay filamentary.
-  vec3 velB = texture(uVelocity, buv).xyz;
-  vec2 fuv = dirToUv(normalize(bpos + velB * uDt));
-  vec3 phiN = texture(uDye, vUv).rgb;
-  vec3 corrected = phiHat + 0.5 * (phiN - dye(fuv));
-  // monotonicity limiter: clamp to the backtrace neighbourhood so the
-  // correction never overshoots (no ringing / colour speckle)
-  vec3 c0 = dye(buv + vec2(uTexel.x, 0.0));
-  vec3 c1 = dye(buv - vec2(uTexel.x, 0.0));
-  vec3 c2 = dye(buv + vec2(0.0, uTexel.y));
-  vec3 c3 = dye(buv - vec2(0.0, uTexel.y));
-  vec3 lo = min(phiHat, min(min(c0, c1), min(c2, c3)));
-  vec3 hi = max(phiHat, max(max(c0, c1), max(c2, c3)));
-  corrected = clamp(corrected, lo, hi);
-  vec3 initC = texture(uInitDye, buv).rgb;
-  outColor = vec4(mix(corrected, initC, uInject), 1.0);
-}
-`;
-
-// Pass 4 — sharpen (mild unsharp mask), applied periodically to counter
-// the diffusion inherent in bilinear semi-Lagrangian advection. Offsets
-// are taken in direction space so the U seam and poles stay consistent.
-const SHARPEN_FRAG = /* glsl */ `
-precision highp float;
-in vec2 vUv;
-out vec4 outColor;
-uniform sampler2D uDye;
-uniform vec2 uTexel;
-uniform float uAmount;
-${EQUIRECT_COMMON}
-void main() {
-  vec3 c = texture(uDye, vUv).rgb;
-  vec3 dir = uvToDir(vUv);
-  vec3 t = normalize(abs(dir.y) > 0.98 ? cross(dir, vec3(1, 0, 0)) : cross(dir, vec3(0, 1, 0)));
-  vec3 b = normalize(cross(dir, t));
-  float ang = uTexel.y * PI * 1.2;
-  vec3 n0 = texture(uDye, dirToUv(normalize(dir + t * ang))).rgb;
-  vec3 n1 = texture(uDye, dirToUv(normalize(dir - t * ang))).rgb;
-  vec3 n2 = texture(uDye, dirToUv(normalize(dir + b * ang))).rgb;
-  vec3 n3 = texture(uDye, dirToUv(normalize(dir - b * ang))).rgb;
-  // fade out toward the poles, where the fixed angular offset spans many
-  // texels of longitude and sharpening moires
-  float amount = uAmount * smoothstep(0.0, 0.15, length(dir.xz));
-  vec3 sharpened = c + (c - (n0 + n1 + n2 + n3) * 0.25) * amount;
-  // limiter: never create new extrema, so repeated sharpening can't ring
-  vec3 lo = min(c, min(min(n0, n1), min(n2, n3)));
-  vec3 hi = max(c, max(max(n0, n1), max(n2, n3)));
-  outColor = vec4(clamp(sharpened, lo, hi), 1.0);
 }
 `;
 
@@ -311,33 +219,16 @@ class GasGiantSim {
     this.seedOffset = rng() * 100;
 
     // --- render targets (equirect; x wraps, y clamps) ---
-    const rtOpts = {
-      type: THREE.HalfFloatType,
-      minFilter: THREE.LinearFilter,
-      magFilter: THREE.LinearFilter,
-      wrapS: THREE.RepeatWrapping,
-      wrapT: THREE.ClampToEdgeWrapping,
-      depthBuffer: false,
-      stencilBuffer: false,
-    };
-    this.velRT  = new THREE.WebGLRenderTarget(this.simW, this.simH, rtOpts);
-    this.initRT = new THREE.WebGLRenderTarget(this.simW, this.simH, rtOpts);
-    this.dyeA   = new THREE.WebGLRenderTarget(this.simW, this.simH, rtOpts);
-    this.dyeB   = new THREE.WebGLRenderTarget(this.simW, this.simH, rtOpts);
+    this.velRT  = makeRT(this.simW, this.simH);
+    this.initRT = makeRT(this.simW, this.simH);
+    this.dyeA   = makeRT(this.simW, this.simH);
+    this.dyeB   = makeRT(this.simW, this.simH);
 
     // --- fullscreen quad machinery ---
     this.quadScene = new THREE.Scene();
     this.quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
     const geo = new THREE.PlaneGeometry(2, 2);
-
-    const mkMat = (frag, uniforms) => new THREE.RawShaderMaterial({
-      glslVersion: THREE.GLSL3,
-      vertexShader: QUAD_VERT,
-      fragmentShader: frag,
-      uniforms,
-      depthTest: false,
-      depthWrite: false,
-    });
+    const mkMat = makeQuadMat;
 
     this.velMat = mkMat(VELOCITY_FRAG, {
       uNoiseScale: { value: this.params.noiseScale },
@@ -367,8 +258,9 @@ class GasGiantSim {
     });
     this.sharpenMat = mkMat(SHARPEN_FRAG, {
       uDye: { value: null },
-      uTexel: { value: new THREE.Vector2(1 / this.simW, 1 / this.simH) },
       uAmount: { value: this.params.sharpenAmount },
+      uAngStep: { value: (1 / this.simH) * Math.PI * 1.2 },   // one texel of latitude
+      uPoleFade: { value: 1 },                                // equirect poles moire
     });
 
     this.quad = new THREE.Mesh(geo, this.velMat);

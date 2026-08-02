@@ -696,6 +696,17 @@ class Planet {
   // Pure function of position + iceLine (perlin/worley only), so it stays
   // seed-deterministic and can be evaluated at any resolution.
   //
+  // NOTE ON EDGE DETAIL: this is the BAKE's rule, and the export uses it too.
+  // The GL shader's polar block is not quite the same shape — it feeds the
+  // boundary RAW snoise3, which in this codebase ends in `105.0 * dot(...)`
+  // (2.5x the canonical 42.0) and skips the `* 0.5` every other shader site
+  // uses to bring simplex back to the CPU's [-1,1] convention — so the live
+  // view's cap edge is raggeder and throws detached floes the bake never makes.
+  // The two agree on cap AREA at a given ice line (measured 2.93% vs 2.97% at
+  // 0.89), only on edge character. Reproducing the shader's edge on the CPU
+  // needs its exact noise, which can't be validated without running the GPU,
+  // so the rules are deliberately left as one — see the map-export notes.
+  //
   // `out` (optional [overshoot]) receives how far past the threshold the pixel
   // sits, for the caller's interior crevasse / blue-shift texturing.
   polarSheetCover(x, y, z, absLat, iceLine, out) {
@@ -707,11 +718,12 @@ class Planet {
     // needs 0.223 + AA_BAND, high cut 0.223 + the consolidation threshold.
     if (absLat < thr - 0.25) { if (out) out[0] = -1; return 0; }
     if (absLat > thr + 0.32) { if (out) out[0] = 0.32; return 1; }   // deep interior
-    const e = this.perlin2.fbm(x*1.5+21, y*1.5+21, z*1.5+21, 2) * 0.10   // large embayments
-            + this.perlin2.fbm(x*3.2+11, y*3.2+11, z*3.2+11, 2) * 0.060
-            + this.perlin3.fbm(x*7.0+33, y*7.0+33, z*7.0+33, 2) * 0.034
-            + this.perlin3.fbm(x*15+77, y*15+77, z*15+77, 2) * 0.018
-            + this.perlin3.fbm(x*31+50, y*31+50, z*31+50, 2) * 0.010;  // fine crenellation
+    const P2 = this.perlin2, P3 = this.perlin3;
+    const e = P2.fbm(x*1.5+21, y*1.5+21, z*1.5+21, 2) * 0.10      // large embayments
+            + P2.fbm(x*3.2+11, y*3.2+11, z*3.2+11, 2) * 0.060
+            + P3.fbm(x*7.0+33, y*7.0+33, z*7.0+33, 2) * 0.034
+            + P3.fbm(x*15+77, y*15+77, z*15+77, 2) * 0.018
+            + P3.fbm(x*31+50, y*31+50, z*31+50, 2) * 0.010;        // fine crenellation
     const overshoot = (absLat + e) - thr;
     if (out) out[0] = overshoot;
     const AA_BAND = 0.008;             // ~1-2 pixels of soft transition
@@ -1477,8 +1489,10 @@ class Planet {
   }
 
   // Decompose the surface into separable equirect LAYERS for the map export:
-  // GROUND (bare land), VEGETATION, SNOW/ICE, WATER (rivers+oceans together),
-  // CLOUDS. Each is { rgb: Uint8ClampedArray(N*3), alpha: Float32Array(N) } at
+  // GROUND (the whole solid surface — bare rock/sand/coast AND the seabed, so
+  // the oceans can be lifted off), VEGETATION, SNOW/ICE, WATER (rivers+oceans
+  // together), CLOUDS.
+  // Each is { rgb: Uint8ClampedArray(N*3), alpha: Float32Array(N) } at
   // texW×texH, re-running the exact classifier math so composited layers match
   // the rendered planet. rgb is DEFINED EVERYWHERE (coverage lives only in
   // alpha) so bilinear upscaling never fringes. Deterministic (same seeded
@@ -1487,7 +1501,7 @@ class Planet {
   // opts carries the LIVE look so the export is the current view, not the
   // as-generated one. Two groups:
   //   • always live — riverStrength, cloudCover, cloudMul, cloudColor[0-255],
-  //     ashCloud[0-255], vegetation, gradient.
+  //     ashCloud[0-255], vegetation, relief, gradient.
   //   • opts.terraform — the renderer is re-classifying the surface on the GPU
   //     (the TERRAFORM sliders moved), so seaLevel / iceLine / snowOffset must
   //     come from opts too and the snow line follows the SHADER's rule rather
@@ -1581,6 +1595,7 @@ class Planet {
     const cloudCol = opts.cloudColor || [255, 255, 255];
     const ashCol = opts.ashCloud || [58, 46, 36];
     const vegMul = opts.vegetation != null ? opts.vegetation : 1;
+    const relief = opts.relief != null ? opts.relief : 1;   // DISPLACEMENT slider
 
     for (let j = 0; j < OH; j++) {
       const v = (j + 0.5) / OH;
@@ -1639,7 +1654,10 @@ class Planet {
         // iceMap), so it both tracks the ICE slider and comes out crisp at 4K.
         const polarIce = (isTerr && pal.polarIce) ? this.polarSheetCover(x, y, z, absLat, iceLine) : 0;
         let snowCover = polarIce;
-        if (isTerr) {
+        // Snowcaps are a LAND feature in both classifiers (the shader only
+        // reaches the snow block in its h >= seaLevel branch), so drowned
+        // terrain must not sprout them when the sea rises.
+        if (isTerr && aboveSea >= 0) {
           // Snow line: while the sliders are live the shader lowers it toward
           // the poles and shifts it by SNOW (0.50 at the equator → 0.08 at the
           // pole); the baked classifier uses a flat 0.50 gated by an altitude
@@ -1677,6 +1695,23 @@ class Planet {
           rt *= (1 - coldFade);
           riverCover = rt * clamp(0.55 + 0.35 * riverStrength, 0, 1);
           riverCol = mixRgb(pal.shore, pal.water, clamp(flow, 0, 1));
+        }
+        // ---- seafloor relief on the OCEAN colour ----
+        // The shader shades the whole globe, water included, with the live
+        // relief bump; port that term for parity (planet-shader.js:
+        // factor = 0.92 + shade*0.16 over water, damped by ice cover). Oceans
+        // only — rivers sit on land the altitude ramp already makes legible.
+        // Do NOT expect this to reveal bathymetry: the water branch's 0.16 span
+        // against this height map's gradients measures a ~2% brightness swing
+        // (p90). What makes drowned continents visible in the view is the
+        // shader's NORMAL perturbation feeding the lighting, which an unlit
+        // albedo export can't carry — the GROUND layer's seabed does that job.
+        if (relief > 0.001 && oceanCover > 0 && palHasWater) {
+          // gx already carries the cos-lat correction, matching the shader's
+          // kx = 1.5*uRelief*cos(lat) against the raw longitudinal difference.
+          const shade = clamp(0.5 - (gx + gy) * 1.5 * relief * (1 - polarIce), 0, 1);
+          const f = 1 + ((0.92 + shade * 0.16) - 1) * (1 - polarIce);
+          waterCol = [waterCol[0] * f, waterCol[1] * f, waterCol[2] * f];
         }
         if (riverCover > oceanCover) put(L.water, k, grade(riverCol, 0), clamp(riverCover, 0, 1));
         else put(L.water, k, grade(waterCol, 0), oceanCover);
@@ -1718,11 +1753,25 @@ class Planet {
             else groundCol = mixRgb(pal.mountain, pal.peak, smoothstep(0.7, 0.95, aboveSea));
           }
           if (tundra > 0) groundCol = mixRgb(groundCol, mixRgb(pal.hills, pal.arid, 0.4), tundra * 0.65);
+          // Below sea level the ramp has no branch of its own — the WATER layer
+          // paints those pixels in the view — so continue it downward instead of
+          // stopping at the shore: the coast material darkens and cools with
+          // depth into an abyssal tone. That makes GROUND the whole solid
+          // surface (shelf → slope → basin), so hiding or knocking back the
+          // water layer reveals the drowned continents rather than a hole.
+          if (aboveSea < 0) {
+            const dp = smoothstep(0, 0.85, clamp(-aboveSea / 0.45, 0, 1));
+            groundCol = [groundCol[0] * (1 - 0.62 * dp), groundCol[1] * (1 - 0.56 * dp), groundCol[2] * (1 - 0.44 * dp)];
+          }
           // organic colour-detail mottling (identical factor applied to veg
           // below, so the composited layers match colorPixelRocky's baked look)
           const cd = this._colorDetail(x, y, z) * grainMul;
           groundCol = [groundCol[0] * cd, groundCol[1] * cd, groundCol[2] * cd];
-          put(L.ground, k, grade(groundCol, 1), landMask);
+          // Full coverage, seabed included. Water composites on top, so an
+          // all-layers export is unchanged; a GROUND-only export is the planet
+          // with its oceans drained. (The land silhouette is still available as
+          // the WATER layer's mask, inverted.)
+          put(L.ground, k, grade(groundCol, 1), 1);
 
           // vegetation overlay — folds in the classifier's tropical/temperate
           // green tints so the tone matches, and fades the base green with

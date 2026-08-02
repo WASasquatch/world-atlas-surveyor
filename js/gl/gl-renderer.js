@@ -14,6 +14,7 @@ import * as THREE from '../vendor/three.module.min.js';
 import { Renderer as CpuRenderer } from '../renderer.js';
 import { PLANET_VERT, PLANET_FRAG } from './planet-shader.js';
 import { GasGiantSim } from './gas-giant-sim.js';
+import { AuroraSim } from './aurora-sim.js';
 import { Quality } from '../core/quality.js';
 
 const TEX_W = 768, TEX_H = 384;
@@ -170,6 +171,7 @@ class GLRenderer {
     this.sunAz = -28; this.sunEl = 18; this.viewTilt = 0;
     this.sunIntensity = 100; this.sunHue = 0;
     this.gasSim = null;
+    this.auroraSim = null;
     this.starTime = 0;
 
     // terraform state (uniform mirror; null field = use baked default)
@@ -225,7 +227,6 @@ class GLRenderer {
       uCosT: { value: 1 }, uSinT: { value: 0 },
       uCosTilt: { value: 1 }, uSinTilt: { value: 0 },
       uRotation: { value: 0 },
-      uAuroraTime: { value: 0 },
       uSunDir: { value: new THREE.Vector3(0, 0, 1) },
       uSunColor: { value: new THREE.Vector3(1, 1, 1) },
       uSunFalloff: { value: 1 },
@@ -243,6 +244,12 @@ class GLRenderer {
       uAuroraOn: { value: 0 },
       uAuroraColor: { value: new THREE.Vector3(0, 1, 0.5) },
       uAuroraBase: { value: 0 },
+      uAuroraTex: { value: empty },
+      uAuroraAxis: { value: new THREE.Vector3(0, 1, 0) },
+      // emission shell as a fraction of planet radius. Earth's aurora spans
+      // ~90-400 km over a 6371 km radius (1.4%-6.3%); exaggerated a little,
+      // like uAtmThickness, so the volume actually reads at this scale.
+      uAuroraShell: { value: new THREE.Vector2(0.016, 0.085) },
       uCloudColor: { value: new THREE.Vector3(1, 1, 1) },
       uHasClouds: { value: 0 },
       uCloudShift: { value: 0 },
@@ -403,6 +410,7 @@ class GLRenderer {
       this.u.uGasTex.value = this.gasSim.texture;
       this.u.uUseGasTex.value = 1;
     }
+    if (this.auroraSim && this.planet) this._buildAuroraSim(this.planet);
   }
 
   // ---------- planet texture upload ----------
@@ -411,6 +419,7 @@ class GLRenderer {
     for (const t of this.textures) t.dispose();
     this.textures = [];
     if (this.gasSim) { this.gasSim.dispose(); this.gasSim = null; }
+    if (this.auroraSim) { this.auroraSim.dispose(); this.auroraSim = null; }
     const u = this.u;
     const cfg = planet.getTypeConfig();
     const pal = planet.palette || {};
@@ -519,7 +528,27 @@ class GLRenderer {
     } else {
       u.uUseGasTex.value = 0;
     }
+    // Aurora precipitation mask — an oval seeded into a dye texture and folded
+    // by the same flow machinery (aurora-sim.js). Only built for bodies whose
+    // palette grants them auroras, since it is a second live sim.
+    this._buildAuroraSim(planet);
     this._setQualityUniforms();
+  }
+
+  _buildAuroraSim(planet) {
+    if (this.auroraSim) { this.auroraSim.dispose(); this.auroraSim = null; }
+    if (!planet || !this._hasAuroraCol) { this.u.uAuroraTex.value = this.emptyTex; return; }
+    this.auroraSim = new AuroraSim(this.gl, planet,
+      { size: Quality.get().auroraSim, activity: this._auroraActivity() });
+    this.u.uAuroraTex.value = this.auroraSim.texture;
+    this.u.uAuroraAxis.value.copy(this.auroraSim.magAxis);
+  }
+
+  // The AURORA slider (0..2x) drives brightness in the shader and, more
+  // interestingly, the sim's Kp analogue: a strong storm pushes the oval
+  // equatorward and widens it, exactly as a real one does.
+  _auroraActivity() {
+    return Math.max(0, Math.min(1, (this.terraform.aurora ?? 1) * 0.42));
   }
 
   /** True when the current planet supports live re-classification. */
@@ -645,6 +674,19 @@ class GLRenderer {
       }
       this.u.uGasTex.value = this.gasSim.texture;
     }
+    // uAuroraOn is set further down from this frame's atmosphere, so this reads
+    // last frame's value — one frame of lag when the aurora switches on, versus
+    // stepping a sim nothing samples on every thin-atmosphere world.
+    if (this.auroraSim && this.u.uAuroraOn.value > 0.5 && (this.terraform.aurora ?? 1) > 0.001) {
+      // Same fixed ~60 Hz cadence as the gas sim, scaled by CHURN, and frozen
+      // during capture so a 360 spin loops seamlessly.
+      if (!this.capturing) {
+        this._auAcc = (this._auAcc || 0) + dt * this.flowChurn;
+        const steps = Math.min(Quality.get().simSteps, Math.floor(this._auAcc / 16.7));
+        if (steps > 0) { this._auAcc -= steps * 16.7; this.auroraSim.step(steps); }
+      }
+      this.u.uAuroraTex.value = this.auroraSim.texture;
+    }
 
     const planet = this.planet, u = this.u;
     const W = this.internalW, H = this.internalH;
@@ -659,7 +701,6 @@ class GLRenderer {
     u.uRotation.value = this.rotation;
     // cloud drift + aurora morph freeze during capture so a 360 spin loops
     u.uCloudShift.value = this.capturing ? 0.0 : this.rotation * 0.02;
-    u.uAuroraTime.value = this.capturing ? 0.0 : this.rotation;
     u.uFlowTime.value = this.starTime * 0.02 * this.flowChurn;
 
     // sun
@@ -704,6 +745,9 @@ class GLRenderer {
     u.uVortexStrength.value = tf.flowMul ?? 1;
     u.uEmission.value = tf.emission ?? 1;
     u.uAuroraStrength.value = tf.aurora ?? 1;
+    // A stronger storm is not just brighter — it drives the oval equatorward.
+    // setActivity no-ops unless the value actually moved, so this is free.
+    if (this.auroraSim) this.auroraSim.setActivity(this._auroraActivity());
     u.uSnowOffset.value = tf.snowOffset ?? 0;
     u.uRiverStrength.value = tf.riverStrength ?? 1;
     u.uRelief.value = this._relief ?? 1;
@@ -858,6 +902,7 @@ class GLRenderer {
 
   dispose() {
     if (this.gasSim) { this.gasSim.dispose(); this.gasSim = null; }
+    if (this.auroraSim) { this.auroraSim.dispose(); this.auroraSim = null; }
     for (const t of this.textures) t.dispose();
     this.textures = [];
     this.emptyTex.dispose();

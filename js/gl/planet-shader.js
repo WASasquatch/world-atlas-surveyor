@@ -11,6 +11,7 @@
 // u = lon/2pi + 0.5, v = lat/pi + 0.5; all maps 768x384 equirect.
 
 import { SIMPLEX_3D, SIMPLEX_4D, FBM_4D, WORLEY_3D } from './noise-glsl.js';
+import { AU_COLAT_MAX } from './flow-common.js';
 
 const PLANET_VERT = /* glsl */ `
 in vec3 position;
@@ -35,7 +36,6 @@ uniform vec2  uCenter;         // planet center in internal pixels (y-down)
 uniform float uCosT, uSinT;    // spin
 uniform float uCosTilt, uSinTilt; // axial + view tilt
 uniform float uRotation;       // rotation
-uniform float uAuroraTime;     // aurora morph clock (frozen during capture)
 
 // --- sun ---
 uniform vec3  uSunDir;         // view space, CPU convention (y-down)
@@ -55,8 +55,11 @@ uniform float uLavaGlow;       // 1 = volcanic lava emissive
 uniform float uHasAsh;
 uniform vec3  uAshCloud;
 uniform float uAuroraOn;
-uniform vec3  uAuroraColor;
+uniform vec3  uAuroraColor;    // palette tint for the primary (green) emission
 uniform float uAuroraBase;
+uniform sampler2D uAuroraTex;  // advected precipitation mask (dual polar caps)
+uniform vec3  uAuroraAxis;     // magnetic dipole axis, planet space
+uniform vec2  uAuroraShell;    // emission shell: inner/outer altitude, x radius
 uniform vec3  uCloudColor;
 uniform float uHasClouds;
 uniform float uCloudShift;     // rotation * 0.02
@@ -565,6 +568,133 @@ float bandProfile(float u, float base, float top) {
   return smoothstep(0.0, 0.14, t) * (1.0 - smoothstep(0.5, 1.0, t));
 }
 
+// ============================================================================
+// AURORA — volumetric, mask-driven.
+//
+// The SHAPE comes entirely from uAuroraTex: an auroral oval seeded into a dye
+// texture and then sheared and folded by the same gaseous-giganticus flow the
+// gas giants use (see aurora-sim.js), so arcs curl and spiral the way real
+// ones do instead of being sin() rings. Nothing here knows what an arc is; it
+// samples a precipitation mask and integrates emission through a shell.
+//
+// The COLOUR comes from altitude. Three real emission lines with three very
+// different vertical profiles, which is why photographs of auroras are colour
+// graded from bottom to top rather than uniformly green:
+//   N2+ 427.8 nm  violet   under ~110 km, and only under hard precipitation
+//   OI  557.7 nm  green    the bright 100-250 km body, sharp lower border
+//   OI  630.0 nm  red      200 km up; forbidden, ~110 s lifetime, so collisions
+//                          quench it below that — hence red tops over green
+// Which of them dominates depends on how deep the electrons get, which is the
+// mask's G channel (characteristic energy). Soft precipitation stops high and
+// glows red; hard precipitation drives down into green with a violet fringe.
+// ============================================================================
+
+const float AU_COLAT_MAX = ${AU_COLAT_MAX};
+const vec3  AU_VIOLET = vec3(0.42, 0.20, 0.96);
+const vec3  AU_RED    = vec3(1.00, 0.16, 0.24);
+
+// Cap-frame direction -> mask UV (dual azimuthal-equidistant discs, left half
+// the +y cap, right half -y). Returns x < 0 for directions equatorward of the
+// disc rim, so the caller can skip the fetch.
+vec2 dirToAuroraUv(vec3 md) {
+  float rr = acos(clamp(abs(md.y), 0.0, 1.0)) / AU_COLAT_MAX;
+  if (rr > 1.0) return vec2(-1.0);
+  vec2 xz = vec2(md.x, md.z);
+  float m = length(xz);
+  vec2 p = m > 1e-6 ? (xz / m) * rr : vec2(0.0);
+  vec2 uv = p * 0.5 + 0.5;
+  return vec2(uv.x * 0.5 + step(md.y, 0.0) * 0.5, uv.y);
+}
+
+// Emission colour and density at normalised shell altitude u, for electrons of
+// characteristic energy energy and discreteness disc.
+vec3 auroraEmission(float u, float energy, float disc, out float dens) {
+  // Green body. Hard electrons penetrate deeper, so the peak drops.
+  float gPeak = mix(0.38, 0.13, energy);
+  float gBase = gPeak - 0.085;
+  // Discrete arcs stream much further up as rays; diffuse glow is squat.
+  float tail = mix(5.8, 2.9, disc);
+  float green = smoothstep(gBase - 0.015, gBase + 0.055, u)   // knife-sharp underside
+              * exp(-max(u - gPeak, 0.0) * tail);
+  // N2+ fringe hugging the lower border — only where the beam is hard.
+  float vd = (u - gBase * 0.85) / 0.06;
+  float violet = exp(-vd * vd) * energy * energy;
+  // Forbidden red, surviving only where the air is thin enough not to quench it.
+  float red = smoothstep(0.26, 0.64, u) * exp(-max(u - 0.88, 0.0) * 4.0)
+            * (0.28 + 1.10 * (1.0 - energy));
+  dens = green + violet * 0.5 + red * 0.7;
+  return uAuroraColor * green + AU_VIOLET * (violet * 0.85) + AU_RED * (red * 0.9);
+}
+
+// Front-to-back emissive march of the aurora shell along the orthographic view
+// ray (x, y) = (dx, dy), from z = zStart down to z = zEnd. Purely additive —
+// the shell is optically thin, so there is no extinction to track.
+vec3 marchAurora(float dx, float dy, float zStart, float zEnd, float dither) {
+  vec3 sum = vec3(0.0);
+  float span = zStart - zEnd;
+  if (span <= 0.0) return sum;
+
+  // Magnetic-local-time frame: +y is the dipole axis (fixed in the crust, so it
+  // swings round as the planet turns), +x points sunward. Building the frame
+  // this way is what locks the oval's teardrop to the sun while the surface
+  // rotates underneath, which is the real geometry — the sim bakes its
+  // day/night asymmetry in these same coordinates.
+  vec3 mAxis = normalize(uAuroraAxis);
+  vec3 sunP = viewToPlanet(uSunDir);
+  vec3 mX = sunP - mAxis * dot(sunP, mAxis);
+  float mXlen = length(mX);
+  mX = mXlen > 1e-4 ? mX / mXlen : normalize(cross(mAxis, vec3(0.0, 0.0, 1.0)));
+  vec3 mZ = cross(mAxis, mX);
+
+  // Cheap reject before committing to the march: the oval lives inside a cone
+  // 55 deg about +-mAxis, so if neither chord end nor the midpoint comes within
+  // a generous margin of it, no sample on this ray can be lit. Most of the disc
+  // is equatorial and bails here for three dot products instead of 20 fetches.
+  float zm = (zStart + zEnd) * 0.5;
+  float reach = max(max(
+      abs(dot(viewToPlanet(normalize(vec3(dx, dy, zStart))), mAxis)),
+      abs(dot(viewToPlanet(normalize(vec3(dx, dy, zEnd))), mAxis))),
+      abs(dot(viewToPlanet(normalize(vec3(dx, dy, zm))), mAxis)));
+  if (reach < 0.42) return sum;                     // ~65 deg colat, with margin
+
+  int STEPS = uQAuroraDetail >= 2 ? 22 : 14;
+  float dt = span / float(STEPS);
+  float rIn = 1.0 + uAuroraShell.x, rOut = 1.0 + uAuroraShell.y;
+  float invSpan = 1.0 / max(rOut - rIn, 1e-4);
+
+  for (int i = 0; i < 24; i++) {
+    if (i >= STEPS) break;
+    float z = zStart - (float(i) + dither) * dt;
+    vec3 p = vec3(dx, dy, z);
+    float rad = length(p);
+    if (rad < rIn || rad > rOut) continue;
+    vec3 d = p / rad;
+    vec3 wd = viewToPlanet(d);
+    float my = dot(wd, mAxis);
+    if (abs(my) < 0.575) continue;                  // outside both caps (>55 deg colat)
+    vec2 auv = dirToAuroraUv(vec3(dot(wd, mX), my, dot(wd, mZ)));
+    if (auv.x < 0.0) continue;
+    vec3 mk = texture(uAuroraTex, auv).rgb;
+    float flux = mk.r;
+    if (flux < 0.004) continue;
+    float u = (rad - rIn) * invSpan;
+    float dens;
+    vec3 emit = auroraEmission(u, clamp(mk.g, 0.0, 1.0), clamp(mk.b, 0.0, 1.0), dens);
+    // Sunlit air scatters far more light than the aurora emits, so the display
+    // washes out on the dayside exactly as it does from orbit.
+    float dayFade = mix(1.0, 0.10, smoothstep(-0.08, 0.40, dot(d, uSunDir)));
+    sum += emit * (flux * dens * dt * dayFade);
+  }
+  // AU_GAIN converts the path integral to display units and is the one knob to
+  // turn if the whole system reads too hot or too dim. Back-of-envelope for the
+  // default shell: a column seen from overhead integrates ~0.018, so 30x lands
+  // it near 0.45 — a soft glow, under the 0.85 bloom threshold. A grazing ray at
+  // the limb crosses ~10x more shell, so it lands near 4.5 and blooms hard.
+  // That ratio is the point: the oval is a wall at the limb and a haze underfoot.
+  const float AU_GAIN = 30.0;
+  return sum * (uAuroraBase * uAuroraStrength * AU_GAIN);
+}
+
 void main() {
   if (uSurfaceMode > 0.5) {
     vec3 w = uvToDirEquirect(vUv);
@@ -651,7 +781,22 @@ void main() {
   float atmR = shapeR + uAtmThickness;
   vec3 l = uSunDir;
 
+  // aurora shell radius — rays that miss the planet can still cross it, which
+  // is how curtains stand up off the limb against black sky
+  float auroraOn = (uAuroraOn > 0.5 && uAuroraStrength > 0.001) ? 1.0 : 0.0;
+  float auR = auroraOn > 0.5 ? 1.0 + uAuroraShell.y : 0.0;
+  // per-pixel march offset — 12-20 steps through a smooth shell otherwise
+  // stair-steps into visible contour rings
+  float auDither = fract(sin(dot(frag, vec2(12.9898, 78.233))) * 43758.5453);
+
   if (r2 > shapeR * shapeR) {
+    // ---------- aurora above the limb ----------
+    // Nothing occludes these rays, so integrate the whole chord front to back.
+    vec3 auGlow = vec3(0.0);
+    if (auroraOn > 0.5 && r2 < auR * auR) {
+      float zh = sqrt(auR * auR - r2);
+      auGlow = marchAurora(dx, dy, zh, -zh, auDither);
+    }
     // ---------- outer halo ----------
     if (uAtmThickness > 0.0 && r2 < atmR * atmR) {
       float tEdge = (r2 - shapeR * shapeR) / (atmR * atmR - shapeR * shapeR);
@@ -664,10 +809,16 @@ void main() {
       float alpha = min(0.98, falloff * (0.10 + 0.95 * glowSide) * (uAtmThickness * 3.0) * uAtmDensity) * uSunFalloff;
       float band = clamp(1.0 - abs(sideRaw) * 3.0, 0.0, 1.0);
       vec3 haloC = mix(uAtmColor, vec3(1.0, 0.52, 0.30), band * 0.45);
-      outColor = vec4(haloC * uSunColor, alpha);
+      // Sum both as premultiplied emission, then convert back to the straight
+      // alpha the composite expects, so the glow adds over stars instead of
+      // punching a hole in the halo.
+      vec3 pre = haloC * uSunColor * alpha + auGlow;
+      float a = clamp(alpha + max(max(auGlow.r, auGlow.g), auGlow.b), 0.0, 1.0);
+      outColor = vec4(a > 1e-4 ? pre / a : pre, a);
       return;
     }
-    outColor = vec4(0.0);
+    float ga = clamp(max(max(auGlow.r, auGlow.g), auGlow.b), 0.0, 1.0);
+    outColor = ga > 1e-4 ? vec4(auGlow / ga, ga) : vec4(0.0);
     return;
   }
 
@@ -946,39 +1097,15 @@ void main() {
     c += lavaHot * lavaRiverT * shoreFade * (1.0 - 0.4 * light) * 1.7;
   }
 
-  // ---- auroras — strength slider + flow-driven organic morph ----
-  if (uAuroraOn > 0.5 && uAuroraStrength > 0.001 && abs(w.y) > 0.7) {
-    float tt = uAuroraTime;
-    float alon = atan(w.x, w.z);
-    float hemi = sign(w.y);
-    float nLat = snoise3(vec3(cos(alon), sin(alon), uFlowTime * 3.0 + hemi * 5.0)) * 0.022;
-    float nAct = snoise3(vec3(cos(alon) * 2.0, sin(alon) * 2.0 + hemi * 3.1, uFlowTime * 2.0));
-    float c1Lat = 0.84 + nLat       + 0.030 * sin(2.0 * alon + 0.4 * tt);
-    float c2Lat = 0.92 + nLat * 0.7 + 0.020 * sin(3.0 * alon + 0.6 * tt);
-    float c1HW = 0.034 * (0.7 + 0.4 * sin(3.0 * alon + 0.8 * tt));
-    float c2HW = 0.024 * (0.7 + 0.4 * sin(5.0 * alon + 1.4 * tt));
-    float off1 = (abs(w.y) - c1Lat) / max(c1HW, 1e-4);
-    float off2 = (abs(w.y) - c2Lat) / max(c2HW, 1e-4);
-    float curt1 = abs(off1) < 1.0 ? (1.0 - abs(off1)) * (1.0 - abs(off1)) : 0.0;
-    float curt2 = abs(off2) < 1.0 ? (1.0 - abs(off2)) * (1.0 - abs(off2)) : 0.0;
-    float curt = max(curt1, curt2);
-    float offD = curt1 >= curt2 ? off1 : off2;
-    float longRaw = sin(alon + 0.2 * tt) + 0.5 * sin(3.0 * alon - 0.9 * tt);
-    if (uQAuroraDetail >= 2) longRaw += 0.25 * sin(7.0 * alon + 1.8 * tt);
-    float sinAct = longRaw > 0.05 ? min(1.0, (longRaw - 0.05) * 0.8) : 0.0;
-    float activity = sinAct * (0.35 + 0.65 * (0.5 + 0.5 * nAct));
-    float rayMod = 0.50 + 0.35 * sin(18.0 * alon + 3.0 * tt + 4.0 * offD);
-    if (uQAuroraDetail >= 2) rayMod += 0.15 * sin(45.0 * alon - 5.5 * tt + 2.0 * offD);
-    float rays = max(0.25, rayMod);
-    float ribbon = curt * activity * rays;
-    if (ribbon > 0.005) {
-      float limbFade = dz > 0.30 ? 1.0 : (dz / 0.30) * (dz / 0.30);
-      vec3 auCol = offD < 0.0
-        ? mix(uAuroraColor, vec3(0.353, 0.157, 0.784), clamp(-offD, 0.0, 1.0))
-        : mix(uAuroraColor, vec3(0.902, 0.314, 0.510), clamp(offD, 0.0, 1.0));
-      float nightBoost = 0.3 + 1.8 * (1.0 - light);
-      c += auCol * ribbon * nightBoost * uAuroraBase * limbFade * uAuroraStrength;
-    }
+  // ---- aurora in front of the planet ----
+  // March the shell from its top down to the surface. The curtain is thereby
+  // integrated through its full depth, so a column seen obliquely near the limb
+  // accumulates far more path length than one seen from directly above — which
+  // is exactly why the oval looks like a bright wall at the limb and a soft
+  // glow underfoot.
+  if (auroraOn > 0.5) {
+    float zh = sqrt(max(auR * auR - r2, 0.0));
+    c += marchAurora(dx, dy, zh, dz, auDither);
   }
 
   outColor = vec4(c, 1.0);

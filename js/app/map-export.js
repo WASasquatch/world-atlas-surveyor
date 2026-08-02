@@ -7,6 +7,21 @@
 // MASK mode ignores colour and emits a white-on-transparent coverage matte
 // (flatten on black → the classic white-on-black mask). Baked at native
 // 768×384 then smooth-upscaled to the chosen width via canvas drawImage.
+//
+// GROUND is the whole solid surface, seabed included, so dropping the WATER
+// layer gives you the planet with its oceans drained instead of a hole where
+// they were. That makes GROUND's mask the full globe — for a land/sea matte,
+// take the WATER mask and invert it.
+//
+// KNOWN GAP — polar cap edge. The cap's SIZE tracks the live ice line, but its
+// edge is the CPU bake's, which is smoother than the GL view's: the shader's
+// polar block displaces the boundary with raw snoise3 (105.0-scaled, and
+// missing the `* 0.5` normalisation every other shader site applies), so the
+// live view's cap is raggeder and sheds detached floes. Area agrees (2.93% CPU
+// vs 2.97% shader at ice line 0.89); only the edge character differs. Closing
+// it means either porting the shader's simplex+worley to JS and validating it
+// against the GPU, or normalising the shader's polar noise so all three paths
+// share one convention (which would change the RENDER, not just the export).
 
 // Physical composite order (bottom → top). CLOUDS always last.
 const ORDER = ['ground', 'water', 'veg', 'snow', 'clouds'];
@@ -87,6 +102,7 @@ export function exportMapLayers(renderer, opts = {}) {
     seaLevel: tfLive ? u(renderer, 'uSeaLevel', null) : null,
     iceLine: tfLive ? u(renderer, 'uIceLine', null) : null,
     snowOffset: tfLive ? u(renderer, 'uSnowOffset', 0) : 0,
+    relief: u(renderer, 'uRelief', 1),
     riverStrength: u(renderer, 'uRiverStrength', 1),
     cloudCover: u(renderer, 'uCloudCover', 0.5),
     cloudMul: u(renderer, 'uCloudMul', 1),
