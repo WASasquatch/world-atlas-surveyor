@@ -85,9 +85,16 @@ void main() {
     // so full strength reads as a heavy-but-coherent lens, not a prism.
     float amt = uChroma * (0.0012 + 0.0075 * r);
     vec2 off = vec2(dir.x / uAspect, dir.y) * amt; // → uv, equal pixel shift both axes
-    s.r = texture(uScene, uv - off).r;
+    // Clip the fringe against the hard planet→space limb. The radial channel
+    // split otherwise smears the bright rim into the dark, leaving a glowing blue
+    // ring (outward-shifted B) — and a fainter red one outside (inward-shifted R).
+    // Cap each shifted channel to a multiple of the LOCAL pixel level: a fringe
+    // shows where there's real signal (the surface), but can't invent a bright rim
+    // where the pixel itself is near-black (space), so the rings disappear while
+    // the on-surface aberration is untouched.
+    s.r = min(texture(uScene, uv - off).r, sRaw.r * 1.6 + 0.012);
     s.g = sRaw.g;
-    s.b = texture(uScene, uv + off).b;
+    s.b = min(texture(uScene, uv + off).b, sRaw.b * 1.6 + 0.012);
   } else { s = sRaw.rgb; }
   vec3 bloom = texture(uBloom, uv).rgb * uBloomStrength;
   vec3 c = s + bloom;

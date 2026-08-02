@@ -16,6 +16,10 @@ import { EARTH_MASK, EARTH_MASK_W } from './data/earth-mask.js';
 import { EARTH_HEIGHT, sampleEarthHeight, earthSeaGray } from './data/earth-height.js';
 import { CLOUD_REF, sampleCloudRef } from './data/cloud-ref.js';
 
+// Scratch for polarSheetCover()'s optional second output (overshoot past the
+// ice threshold) — module-level so the per-pixel loops never allocate.
+const SHEET_OUT = [0];
+
 // ---------- PLANET ----------
 class Planet {
   constructor(config) {
@@ -681,6 +685,47 @@ class Planet {
     this.bakeWaterMask(cfg);
   }
 
+  // Polar ice-sheet coverage (0..1) at a surface point for a GIVEN ice line:
+  // a hard threshold with multi-scale noise displacing the boundary into
+  // embayments/tongues, and Worley cells punching the outer band into discrete
+  // floes and detached bergs. Mirrors the GL shader's polar block.
+  //
+  // Factored out of bakeSurfaceColors() so the map export can re-evaluate the
+  // sheet at the LIVE (terraformed) ice line instead of resampling the iceMap
+  // baked at generation — otherwise dragging ICE never moves the exported caps.
+  // Pure function of position + iceLine (perlin/worley only), so it stays
+  // seed-deterministic and can be evaluated at any resolution.
+  //
+  // `out` (optional [overshoot]) receives how far past the threshold the pixel
+  // sits, for the caller's interior crevasse / blue-shift texturing.
+  polarSheetCover(x, y, z, absLat, iceLine, out) {
+    const thr = iceLine - 0.02;
+    // |displacement| is bounded by 0.223 (0.10+0.060+0.034+0.018+0.010, times
+    // perlin's ~1.0 peak), so outside that band the answer is a constant and
+    // the five fbm + two worley lookups can be skipped — worth it because the
+    // export evaluates this per output pixel over the whole globe. Low cut
+    // needs 0.223 + AA_BAND, high cut 0.223 + the consolidation threshold.
+    if (absLat < thr - 0.25) { if (out) out[0] = -1; return 0; }
+    if (absLat > thr + 0.32) { if (out) out[0] = 0.32; return 1; }   // deep interior
+    const e = this.perlin2.fbm(x*1.5+21, y*1.5+21, z*1.5+21, 2) * 0.10   // large embayments
+            + this.perlin2.fbm(x*3.2+11, y*3.2+11, z*3.2+11, 2) * 0.060
+            + this.perlin3.fbm(x*7.0+33, y*7.0+33, z*7.0+33, 2) * 0.034
+            + this.perlin3.fbm(x*15+77, y*15+77, z*15+77, 2) * 0.018
+            + this.perlin3.fbm(x*31+50, y*31+50, z*31+50, 2) * 0.010;  // fine crenellation
+    const overshoot = (absLat + e) - thr;
+    if (out) out[0] = overshoot;
+    const AA_BAND = 0.008;             // ~1-2 pixels of soft transition
+    if (overshoot < -AA_BAND) return 0;
+    if (overshoot < 0) return (overshoot + AA_BAND) / AA_BAND;   // anti-aliased outer edge
+    if (overshoot >= 0.07) return 1;                             // consolidated sheet
+    // Floe zone — two Worley scales break the sheet up: large cells for major
+    // floes, fine cells for ice debris. A pixel is ice if either clears its cut.
+    const wCell = this.worley.noise(x*5+88, y*5+88, z*5+88);
+    const wCellFine = this.worley.noise(x*14+101, y*14+101, z*14+101);
+    if (wCell > 0.18 || wCellFine > 0.30) return 1;
+    return Math.max(clamp((wCell - 0.13) / 0.05, 0, 1), clamp((wCellFine - 0.25) / 0.05, 0, 1));
+  }
+
   // Colour the surface from the (eroded) height + moisture maps. Reads
   // this.heightMap / this.moistureMap; writes this.colorMap + rawColorMap.
   bakeSurfaceColors(cfg, pal) {
@@ -712,8 +757,26 @@ class Planet {
         const gx = sx * Math.max(0.05, cosLat);
         const slope = Math.sqrt(gx * gx + sy * sy);
 
-        // Color
-        let [r, g, b] = this.colorPixelRocky(h, m, lat, cfg, pal, x, y, z, slope);
+        // ---- 3D height-domain warp of the colour-sampling position ----
+        // Shift where the biome noise / mottling / coast & crack detail is sampled
+        // along the FINAL terrain's downhill slope, as a true 3D tangent vector, so
+        // colour drapes over and FLOWS WITH the terrain instead of being a flat,
+        // purely height-driven gradient. Deterministic (heightMap-derived) and
+        // resolution-independent (the 2-texel diffs are scaled to a per-radian
+        // slope). Biome BANDS still key off the real h/m/lat args — only the
+        // spatial texture warps — so continents/altitude zones stay put.
+        const cLon = Math.cos(lon), sLon = Math.sin(lon);
+        const slopeLon = sx * (W / (4 * Math.PI)) / Math.max(cosLat, 0.05);
+        const slopeLat = sy * (H / (2 * Math.PI));
+        const eLonX = -sLon,             eLonZ = cLon;               // east tangent (y=0)
+        const nLatX = -sinLat * cLon, nLatY = cosLat, nLatZ = -sinLat * sLon;  // north tangent
+        const WARP = 0.15;   // downslope colour-flow strength (tunable)
+        const wx = x - (eLonX * slopeLon + nLatX * slopeLat) * WARP;
+        const wy = y - (                   nLatY * slopeLat) * WARP;
+        const wz = z - (eLonZ * slopeLon + nLatZ * slopeLat) * WARP;
+
+        // Color (sampled at the terrain-warped position; biome keyed off real h/m/lat)
+        let [r, g, b] = this.colorPixelRocky(h, m, lat, cfg, pal, wx, wy, wz, slope);
 
         // Polar ice sheet overlay — applied AFTER biome coloring. Uses a
         // HARD-threshold boundary with multi-scale noise + Worley cells so
@@ -722,59 +785,12 @@ class Planet {
         // texture so it doesn't read as flat paint.
         if (pal.polarIce && (this.type === 'terrestrial' || this.type === 'ocean')) {
           const absLatLocal = Math.abs(lat) / (Math.PI / 2);
-          // Multi-scale latitude displacement — large embayments + medium
-          // tongues + fine fractures. Sum of three scales gives complex
-          // edges at every viewing scale.
-          // Multi-scale edge displacement (large lobes → fine crenellation), all
-          // scales always applied so the boundary is ragged at every zoom — mirrors
-          // the GL shader's polar `e`. Deterministic (perlin add/mul only).
-          const e1 = this.perlin2.fbm(x*1.5+21, y*1.5+21, z*1.5+21, 2) * 0.10;
-          const e2 = this.perlin2.fbm(x*3.2+11, y*3.2+11, z*3.2+11, 2) * 0.060;
-          const e3 = this.perlin3.fbm(x*7.0+33, y*7.0+33, z*7.0+33, 2) * 0.034;
-          const e4 = this.perlin3.fbm(x*15+77, y*15+77, z*15+77, 2) * 0.018;
-          const e5 = this.perlin3.fbm(x*31+50, y*31+50, z*31+50, 2) * 0.010;
-          const sheetLat = absLatLocal + e1 + e2 + e3 + e4 + e5;
-
-          // HARD threshold — pixel is either ice or not ice, with only a
-          // tiny anti-aliased boundary band. This is the key change from
-          // the previous gradient-fade behavior.
-          const HARD_THR = cfg.iceLine - 0.02;
-          const AA_BAND = 0.008;  // ~1-2 pixels of soft transition
-
-          // Worley breakup — used as an additional cut on the threshold.
-          // Inside the consolidated cap (well past iceLine) this doesn't
-          // remove anything; near the edge, it punches the sheet into
-          // distinct floes/icebergs.
-          // wCell ranges 0..1: low near cell centers, higher at boundaries.
-          const wCell = this.worley.noise(x*5+88, y*5+88, z*5+88);
-          const wCellFine = this.worley.noise(x*14+101, y*14+101, z*14+101);
-          // How far past the threshold are we?
-          const overshoot = sheetLat - HARD_THR;
-          // In the first 0.06 of overshoot, allow Worley to break the
-          // sheet into floes. Beyond that, the sheet is consolidated.
-          let coverHard;
-          if (overshoot < -AA_BAND) {
-            coverHard = 0;
-          } else if (overshoot < 0) {
-            // Anti-aliased outer edge
-            coverHard = (overshoot + AA_BAND) / AA_BAND;
-          } else if (overshoot < 0.07) {
-            // Floe zone — Worley cells break up the sheet here.
-            // Combine two Worley scales: large (wCell) for major floes,
-            // small (wCellFine) for finer ice debris. A pixel is ice
-            // if either scale's distance is above a threshold.
-            const floePresent = (wCell > 0.18) ? 1 : 0;
-            const debrisPresent = (wCellFine > 0.30) ? 1 : 0;
-            const eitherIce = Math.max(floePresent, debrisPresent);
-            // Soft AA at floe edges
-            const cellEdgeAA = clamp((wCell - 0.13) / 0.05, 0, 1);
-            const debrisEdgeAA = clamp((wCellFine - 0.25) / 0.05, 0, 1);
-            const aaCover = Math.max(cellEdgeAA, debrisEdgeAA);
-            coverHard = eitherIce ? 1 : aaCover;
-          } else {
-            // Consolidated ice sheet — fully covered
-            coverHard = 1;
-          }
+          // Hard threshold at the ice line, noise-displaced into ragged
+          // embayments and broken into floes by Worley cells at the edge —
+          // shared with the map export (see polarSheetCover) so a terraformed
+          // ice line re-cuts exactly the coastline the bake would have made.
+          const coverHard = this.polarSheetCover(x, y, z, absLatLocal, cfg.iceLine, SHEET_OUT);
+          const overshoot = SHEET_OUT[0];   // distance past the threshold
 
           if (coverHard > 0.001) {
             // Record ice coverage so the bump-shader can skip these pixels —
@@ -1465,10 +1481,18 @@ class Planet {
   // CLOUDS. Each is { rgb: Uint8ClampedArray(N*3), alpha: Float32Array(N) } at
   // texW×texH, re-running the exact classifier math so composited layers match
   // the rendered planet. rgb is DEFINED EVERYWHERE (coverage lives only in
-  // alpha) so bilinear upscaling never fringes. opts carries live-look values
-  // (riverStrength, cloudCover, cloudMul, cloudColor[0-255], ashCloud[0-255],
-  // vegetation) so the export tracks the current view; terrain constants come
-  // from the baked cfg. Deterministic (same seeded noise as generation).
+  // alpha) so bilinear upscaling never fringes. Deterministic (same seeded
+  // noise as generation).
+  //
+  // opts carries the LIVE look so the export is the current view, not the
+  // as-generated one. Two groups:
+  //   • always live — riverStrength, cloudCover, cloudMul, cloudColor[0-255],
+  //     ashCloud[0-255], vegetation, gradient.
+  //   • opts.terraform — the renderer is re-classifying the surface on the GPU
+  //     (the TERRAFORM sliders moved), so seaLevel / iceLine / snowOffset must
+  //     come from opts too and the snow line follows the SHADER's rule rather
+  //     than the baked one. Without this a flooded world still exported its
+  //     original continents. Falls back to the baked cfg when absent.
   bakeExportLayers(opts = {}) {
     const SW = this.texW, SH = this.texH;               // source (baked map) resolution
     const OW = Math.max(1, Math.floor(opts.width || SW));  // output resolution
@@ -1530,9 +1554,15 @@ class Planet {
       return L;
     }
 
-    const sea = cfg.seaLevel;
+    // Live re-classification (TERRAFORM sliders) overrides the baked terrain
+    // constants — this is what makes "raise the sea and export" produce the
+    // ocean world on screen instead of the as-generated continents.
+    const tfLive = !!opts.terraform;
+    const sea = (opts.seaLevel != null) ? opts.seaLevel : cfg.seaLevel;
     const COAST_AA = 0.0035;   // half-width (height units) of the crisp coast AA band
-    const iceLine = (cfg.iceLine != null) ? cfg.iceLine : 0.65;
+    const iceLine = (opts.iceLine != null) ? opts.iceLine
+                  : (cfg.iceLine != null) ? cfg.iceLine : 0.65;
+    const snowOffset = opts.snowOffset != null ? opts.snowOffset : 0;
     const isTerr = (this.type === 'terrestrial' || this.type === 'ocean');
     // Only terrestrial/ocean get a separable WATER layer. Exotic rocky types
     // (ice/desert/cratered) have no ocean concept; primordial has magma-province
@@ -1541,7 +1571,10 @@ class Planet {
     // GROUND layer instead (which paints their seas/lava correctly).
     const palHasWater = isTerr && !!(pal.shore && pal.water && pal.deepWater);
     const waterFallback = pal.water || [30, 60, 90];
-    const hm = this.heightMap, mm = this.moistureMap, im = this.iceMap, fm = this.flowMap, cm = this.cloudMap, am = this.ashMap;
+    // NOTE: no iceMap here — the polar sheet is re-evaluated per output pixel
+    // from the LIVE ice line (polarSheetCover) rather than resampled from the
+    // cap baked at generation, so the ICE slider actually moves the export.
+    const hm = this.heightMap, mm = this.moistureMap, fm = this.flowMap, cm = this.cloudMap, am = this.ashMap;
     const riverStrength = opts.riverStrength != null ? opts.riverStrength : 1;
     const cloudCover = opts.cloudCover != null ? opts.cloudCover : 0.5;
     const cloudMul = opts.cloudMul != null ? opts.cloudMul : 1;
@@ -1601,19 +1634,29 @@ class Planet {
           if (depth < 0.04) waterCol = mixRgb(waterCol, [220, 235, 240], (0.04 - depth) * 12);
         }
 
-        // ---- SNOW: polar sheet (iceMap) + mountain snowcap ----
-        const polarIce = clamp(sm(im, uS, vS, 0), 0, 1);
+        // ---- SNOW: polar sheet + mountain snowcap ----
+        // The sheet is recomputed at the live ice line (not read from the baked
+        // iceMap), so it both tracks the ICE slider and comes out crisp at 4K.
+        const polarIce = (isTerr && pal.polarIce) ? this.polarSheetCover(x, y, z, absLat, iceLine) : 0;
         let snowCover = polarIce;
-        if (isTerr && aboveSea > 0.42) {
-          const altBand = clamp((aboveSea - 0.42) / 0.30, 0, 1);
-          const snowNoise = this.perlin2.fbm(x * 8 + 31, y * 8 + 31, z * 8 + 31, 3);
-          const effAlt = aboveSea - snowNoise * 0.10;
-          if (effAlt > 0.50) {
-            let cover = clamp((effAlt - 0.50) / 0.04, 0, 1) * altBand;
-            const rocky = this.perlin3.fbm(x * 22 + 7, y * 22 + 7, z * 22 + 7, 3);
-            if (rocky > 0.18) cover *= clamp(1 - (rocky - 0.18) * 3, 0, 1);
-            cover *= 1 - 0.85 * smoothstep(0.035, 0.13, slope);
-            snowCover = Math.max(snowCover, cover);
+        if (isTerr) {
+          // Snow line: while the sliders are live the shader lowers it toward
+          // the poles and shifts it by SNOW (0.50 at the equator → 0.08 at the
+          // pole); the baked classifier uses a flat 0.50 gated by an altitude
+          // band. Follow whichever one the viewport is currently showing.
+          const snowLine = tfLive ? (0.50 - 0.42 * absLat + snowOffset) : 0.50;
+          if (aboveSea > (tfLive ? snowLine - 0.15 : 0.42)) {
+            const snowNoise = this.perlin2.fbm(x * 8 + 31, y * 8 + 31, z * 8 + 31, 3);
+            const effAlt = aboveSea - snowNoise * 0.10;
+            let cover = tfLive
+              ? clamp((effAlt - snowLine) / 0.05, 0, 1)
+              : clamp((effAlt - 0.50) / 0.04, 0, 1) * clamp((aboveSea - 0.42) / 0.30, 0, 1);
+            if (cover > 0) {
+              const rocky = this.perlin3.fbm(x * 22 + 7, y * 22 + 7, z * 22 + 7, 3);
+              if (rocky > 0.18) cover *= clamp(1 - (rocky - 0.18) * 3, 0, 1);
+              cover *= 1 - 0.85 * smoothstep(0.035, 0.13, slope);
+              snowCover = Math.max(snowCover, cover);
+            }
           }
         }
 
@@ -1625,9 +1668,12 @@ class Planet {
           let rt = smoothstep(th, th + 0.16, flow) * (1 - smoothstep(0.10, 0.26, slope));
           rt *= smoothstep(sea, sea + 0.015, h);
           const climate = absLat + Math.max(aboveSea, 0) * 0.85;
-          // Match the shader river rule: cold-fade uses the polar ICE sheet
-          // (iceMap), NOT the combined snowCover (which includes mountain caps).
-          const coldFade = clamp(Math.max(polarIce, smoothstep(iceLine - 0.20, iceLine + 0.02, climate)), 0, 1);
+          // Match the shader river rule: rivers run INTO the ice and dwindle
+          // there, so the fade is driven by actual sheet coverage (not the
+          // combined snowCover, which includes mountain caps) with a climate
+          // backstop anchored AT the ice line.
+          const coldFade = clamp(Math.max(smoothstep(0.10, 0.55, polarIce),
+                                          smoothstep(iceLine - 0.02, iceLine + 0.16, climate)), 0, 1);
           rt *= (1 - coldFade);
           riverCover = rt * clamp(0.55 + 0.35 * riverStrength, 0, 1);
           riverCol = mixRgb(pal.shore, pal.water, clamp(flow, 0, 1));
@@ -1649,7 +1695,11 @@ class Planet {
           const subtropicalDry = Math.exp(-(sLat * sLat) / 0.018) * (1 - ice) * (1 - tundra);
           const tempD = absLat - 0.50;
           const temperate = Math.exp(-(tempD * tempD) / 0.025) * (1 - ice) * (1 - tundra);
-          let mEff = clamp(m - subtropicalDry * 0.55, 0, 1);
+          // VEG scales MOISTURE, matching the shader (classifyRocky starts with
+          // m *= uVegetation): turning it up widens the green belt into drier
+          // ground instead of merely thickening the greens already there.
+          const mV = clamp(m * vegMul, 0, 1);
+          let mEff = clamp(mV - subtropicalDry * 0.55, 0, 1);
           mEff = clamp(mEff + tropical * 0.15, 0, 1);
 
           // bare ground: coast material, or the DRY altitude ramp (no green)
@@ -1697,10 +1747,12 @@ class Planet {
               if (alpineAmount > 0.05) {
                 const conifer = [pal.forest[0] * 0.55 + 35, pal.forest[1] * 0.75 + 25, pal.forest[2] * 0.55 + 30];
                 vegCol = mixRgb(vegCol, mixRgb(conifer, pal.forest, tropical * 0.6), 0.5);
-                vegA = Math.max(vegA, alpineAmount * 0.65);
+                vegA = Math.max(vegA, alpineAmount * 0.65 * clamp(vegMul, 0, 1));
               }
             }
-            vegA = clamp(vegA * (1 - snowCover) * landMask * vegMul, 0, 1);
+            // no extra vegMul here — VEG already went in through the moisture
+            // (mEff) above, exactly once, the way the shader applies it.
+            vegA = clamp(vegA * (1 - snowCover) * landMask, 0, 1);
           }
           vegCol = [vegCol[0] * cd, vegCol[1] * cd, vegCol[2] * cd];
           put(L.veg, k, grade(vegCol, 2), vegA);

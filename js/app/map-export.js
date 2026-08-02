@@ -72,8 +72,21 @@ export function exportMapLayers(renderer, opts = {}) {
   }
 
   // Live-look values so the export tracks the current view.
+  //
+  // The TERRAFORM sliders re-classify the surface in the SHADER (sea level, ice
+  // line, snow line, vegetation) without ever re-baking the planet's maps, so
+  // the CPU bake has to be driven by the same live uniforms — otherwise raising
+  // SEA gives you an ocean world on screen and the original continents in the
+  // PNG. uTerraform is the renderer's own "live re-classification is on" flag;
+  // while it's off those uniforms just echo the baked cfg (and on
+  // non-terraformable bodies they're not meaningful), so only override then.
+  const tfLive = u(renderer, 'uTerraform', 0) > 0.5;
   const bakeOpts = {
     width: BW, height: BH,
+    terraform: tfLive,
+    seaLevel: tfLive ? u(renderer, 'uSeaLevel', null) : null,
+    iceLine: tfLive ? u(renderer, 'uIceLine', null) : null,
+    snowOffset: tfLive ? u(renderer, 'uSnowOffset', 0) : 0,
     riverStrength: u(renderer, 'uRiverStrength', 1),
     cloudCover: u(renderer, 'uCloudCover', 0.5),
     cloudMul: u(renderer, 'uCloudMul', 1),

@@ -519,13 +519,20 @@ float cloudColumn(vec3 cdir, int deck) {
     float bil = abs(fbm4(vec4(p * 1.9 + 11.0, t * 0.13), max(3, oct - 1), 0.55));
     fb = mix(fb, clamp(fb * 0.45 + bil * 0.72, 0.0, 1.0), billow);
   }
+  // FINE high-frequency detail — two cheap snoise3 taps ABOVE the base fbm's
+  // finest octave, so cloud edges and wisps read closer to the surface's
+  // resolution instead of soft/low-res. snoise3 (3D) compiles far cheaper than
+  // another 4D-fbm octave, so it stays within the D3D shader-compile budget.
+  float hf = snoise3(cdir * stretch * (freq * 17.0) + seed + 400.0) * 0.6
+           + snoise3(cdir * stretch * (freq * 38.0) + seed + 430.0) * 0.4;
+  fb = clamp(fb + hf * 0.15, 0.0, 1.0);
   // broad weather systems — coherent cloudy vs. clear regions
   float sys = fbm4(vec4(cdir * 1.2 + seed + 40.0, t * 0.04), 3, 0.5) * 0.5 + 0.5;
   float cov = clamp(uCloudCover + covBias + cloudLatBias(aLat) + (sys - 0.5) * 0.55, 0.0, 1.0);
   // SOFT coverage remap — a WIDE band (vs. the old 0.20 clip) leaves a graded
   // shoulder the march turns into rounded volume rather than a clipped rim.
   float lo = 1.0 - cov;
-  float h = smoothstep(lo, min(lo + 0.55, 1.0), fb);
+  float h = smoothstep(lo, min(lo + 0.46, 1.0), fb);   // was 0.55; tighter → crisper edges
 
   // VORONOI billow erosion — Worley border-distance (1 at cell centres) eats the
   // thin edges into stacked cauliflower cells while leaving solid cores intact.
